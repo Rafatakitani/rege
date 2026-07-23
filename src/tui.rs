@@ -424,7 +424,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                         }
                         KeyCode::Enter => {
                             let line = app.input.trim().to_string();
-                            if line == "/quit" || line == "/q" {
+                            if matches!(line.as_str(), "/quit" | "/q" | "quit" | "exit" | ":q") {
                                 break;
                             }
                             app.submit();
