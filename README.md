@@ -1,68 +1,105 @@
 # Regente
 
-> Nome provisório. Orquestrador multi-agente de IAs em Ruby.
+> ⚠️ Nome provisório · projeto em desenvolvimento.
 
-Uma ferramenta de terminal onde você conversa com um **mestre** (modelo principal,
-default Claude — trocável) que **comanda outros CLIs de IA** (`claude`, `codex`,
-`gemini`, `opencode`). O mestre avalia a dificuldade da tarefa, monta um time, deixa
-cada worker trabalhar **isolado num `git worktree` + sessão `tmux`**, revisa o
-resultado e **abre um PR** — nunca faz merge sozinho.
-
-## Como funciona
+Orquestrador multi-agente de IAs, em Rust. Uma TUI de terminal onde você conversa
+com um **mestre** (modelo principal, default `claude` — trocável) que **comanda
+outros CLIs de IA** (`claude`, `codex`, `gemini`, `opencode`) como workers. O mestre
+avalia a dificuldade da tarefa, monta um time, deixa cada worker trabalhar **isolado
+num `git worktree` + sessão `tmux`**, revisa o resultado e **abre um PR** — nunca faz
+merge sozinho.
 
 ```
-você ⇄ TUI do mestre (em tmux)  →  mestre (claude/…) via MCP  →  Regente (Ruby)
-                                                                    │
-                              ┌──────────────┬──────────────┬───────┘
-                        worker (worktree A)  (worktree B)  (worktree C)   → review → PR
+você ⇄ TUI do mestre  →  mestre (claude/…) via MCP  →  Regente
+                                                          │
+                        ┌──────────────┬─────────────┬────┘
+                  worker (worktree A)  (worktree B)  (worktree C)  → review → PR
 ```
 
-O app Ruby é, num só processo: **servidor MCP** (expõe as ferramentas ao mestre),
-**controlador tmux** (spawna/monitora/injeta nos workers) e **CLI**.
+O binário é, num só processo: **servidor MCP** (expõe as ferramentas ao mestre),
+**controlador tmux/worktree** (spawna, monitora e injeta nos workers) e a **TUI**.
+
+## ⚠️ Aviso importante
+
+Os workers rodam **auto-aprovando** (`--dangerously-skip-permissions` / `--yolo` /
+sandbox do codex): editam arquivos, rodam comandos e commitam **sem pedir permissão**.
+Ficam confinados a um `git worktree` — a sua branch atual nunca é tocada direto, e a
+saída final é sempre um **PR pra aprovação humana**. Ainda assim: **rode só em repos
+que você controla e entende o que está sendo pedido.** Não é uma sandbox de segurança.
+
+## Requisitos
+
+- Rust / Cargo
+- `git`, `tmux`
+- Pelo menos um CLI de IA instalado e autenticado. **Hoje o mestre só está 100% wired
+  para `claude`**; `codex`/`gemini`/`opencode` funcionam como workers em best-effort.
+- `gh` (opcional) autenticado, pra abrir PRs — sem ele, cai pra `.patch`.
 
 ## Instalação
 
 ```bash
-cd ~/regente
-bundle install
+git clone <este-repo> regente && cd regente
+cargo install --path .
 ```
 
 ## Uso
 
 ```bash
-regente "corrige o bug de login"   # comanda o mestre (abre em tmux persistente)
-regente attach                     # entra na sessão do mestre (local ou via ssh)
-regente doctor                     # health check dos bots do roster + config
-regente config show                # ver config efetiva
-regente config set master.cli gemini   # trocar o mestre
-regente config set timeouts.worker 120
+regente                       # abre a TUI (orquestrador com chat, agentes, temas)
+regente exec "corrige o bug de login"   # headless (tipo `codex exec`), orquestra e imprime
+regente claude                # abre o claude interativo já em modo Regente (playbook+MCP)
+regente doctor                # health check do roster de CLIs + mestre atual
+regente config                # imprime a config efetiva
+regente mcp-serve --repo .    # servidor MCP puro (JSON-RPC stdio) pro repo
+regente render --demo         # desenha um frame da TUI como texto (headless, sem tty)
 ```
 
-**Remote control:** a sessão do mestre roda em tmux (`regente-master`). Do celular/
-outro device: `ssh` (via Tailscale) + `regente attach` → cai na TUI ao vivo.
+### Comandos da TUI
 
-## Configuração (MUITO configurável)
+`/help` · `/theme` (seletor com preview) · `/model <nome>` · `/config` · `/resume`
+(sessões anteriores) · `/agents` · `/buddy` (bicho de estimação animado) · `/quit`
+(ou `exit`). Selecionar texto com o mouse copia via OSC52 (funciona por `ssh`/`tmux`
+com passthrough); desliga em `ui.auto_copy`.
 
-Camadas: `~/.config/regente/config.yml` (global) ← `.regente.yml` (por projeto).
-Editável por arquivo ou por `regente config set`. Ajustável: mestre, roster
-(papel→CLI→modelo), timeouts por papel, playbooks (rodadas de revisão), provider de
-PR, sandbox.
+**Remoto:** a TUI roda em terminal, então do celular/outro device basta `ssh` (via
+Tailscale, p.ex.) + `tmux attach`. Sem app.
 
-## Os dois modos
+## Configuração
+
+Camadas, deep-merge nesta ordem: defaults ← `~/.config/regente/config.yml` (global) ←
+`.regente.yml` (por projeto). Ajustável: mestre (`master.cli` / `master.model`), roster
+(papel→CLI→modelo), tema, `ui.auto_copy`, e mais.
+
+```yaml
+# ~/.config/regente/config.yml
+master:
+  cli: claude
+  model: sonnet   # escala pra opus nos passos difíceis (planner/reviewer/consult)
+ui:
+  theme: hacker
+  auto_copy: true
+```
+
+## Os dois modos de orquestração
 
 - **Fácil** — dividir & conquistar: workers pegam partes diferentes → merge-tudo → revisão.
-- **Difícil** — redundância & juiz: todos fazem o mesmo → merge sintético → loop de
-  conserto (com caça-bug Fable, `verify` se existir, máx N rodadas).
-
-## Segurança
-
-Workers rodam auto-aprovando (YOLO), confinados ao worktree — a `main` nunca é tocada
-direto; a saída é sempre um PR pra aprovação humana.
+- **Difícil** — redundância & juiz: vários fazem o mesmo → merge sintético → loop de
+  conserto (caça-bug, roda os testes se existirem, máx 3 rodadas).
 
 ## Desenvolvimento
 
 ```bash
-bundle exec rake test   # suíte minitest
+cargo test    # 104 testes
+cargo fmt && cargo clippy
 ```
 
-Desenho completo: `docs/superpowers/specs/2026-07-23-regente-design.md`.
+A maior parte da versão Rust foi construída pelo próprio Regente (dogfooding): workers
+em worktrees separados escreveram os módulos de backend. A implementação Ruby original
+está preservada na branch `legacy-ruby`. Desenho completo em
+`docs/superpowers/specs/2026-07-23-regente-design.md`.
+
+## Créditos & licença
+
+- MIT — veja [`LICENSE`](LICENSE).
+- O `/buddy` é um port de [ramarivera/claude-buddy](https://github.com/ramarivera/claude-buddy)
+  (MIT, © ramarivera): espécies, stats e algoritmo de geração determinística.
