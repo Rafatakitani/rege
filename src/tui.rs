@@ -12,10 +12,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Terminal;
 use std::io::Stdout;
 use std::path::PathBuf;
@@ -162,6 +162,18 @@ impl App {
                     self.push(ChatRole::Error, format!("tema inexistente: {name}"));
                 }
             },
+            "/agents" => {
+                if self.agents.is_empty() {
+                    self.push(ChatRole::Info, "nenhum agente ativo");
+                } else {
+                    let names: Vec<String> = self
+                        .agents
+                        .iter()
+                        .map(|a| format!("{} ({})", a.name, a.state.label()))
+                        .collect();
+                    self.push(ChatRole::Info, names.join(", "));
+                }
+            }
             other => {
                 self.push(ChatRole::Error, format!("comando desconhecido: {other}"));
             }
@@ -298,53 +310,107 @@ fn styled(theme: &str, role: Role, text: impl Into<String>) -> Span<'static> {
     Span::styled(text.into(), Style::default().fg(rgb(theme::color(theme, role))))
 }
 
+fn repo_name(app: &App) -> String {
+    std::path::Path::new(&app.repo)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| app.repo.clone())
+}
+
+/// Rounded-border panel with a corner title, colored by `role` (dim for secondary panels).
+fn rounded_block(theme: &str, title: &str, role: Role) -> Block<'static> {
+    let color = rgb(theme::color(theme, role));
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(title.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)))
+}
+
 fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let dash_h = if app.agents.is_empty() { 3 } else { (app.agents.len() as u16 + 2).min(10) };
+    let outer = Layout::default().margin(1).constraints([Constraint::Min(0)]).split(area)[0];
     let chunks = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(6),
         Constraint::Min(1),
-        Constraint::Length(dash_h),
+        Constraint::Length(6),
+        Constraint::Length(3),
         Constraint::Length(1),
     ])
-    .split(area);
+    .split(outer);
 
-    draw_topbar(chunks[0], buf, app);
+    draw_header(chunks[0], buf, app);
     draw_chat(chunks[1], buf, app);
     draw_agents(chunks[2], buf, app);
     draw_input(chunks[3], buf, app);
+    draw_statusbar(chunks[4], buf, app);
 }
 
-fn draw_topbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let repo_name = std::path::Path::new(&app.repo)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| app.repo.clone());
-    let line = Line::from(vec![
-        styled(&app.theme, Role::Accent, "▛▀ REGENTE").add_modifier(Modifier::BOLD),
-        Span::raw("  "),
-        styled(&app.theme, Role::Dim, format!("{} · {} · {}", app.theme, app.master, repo_name)),
-    ]);
-    Paragraph::new(line).render(area, buf);
+fn draw_header(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    let left = rounded_block(&app.theme, " regente ", Role::Accent);
+    let left_inner = left.inner(cols[0]);
+    left.render(cols[0], buf);
+    let lines = vec![
+        Line::from(styled(&app.theme, Role::Accent, "REGENTE").add_modifier(Modifier::BOLD)),
+        Line::from(styled(&app.theme, Role::Dim, format!("mestre {}", app.master))),
+        Line::from(styled(&app.theme, Role::Dim, format!("repo {}", repo_name(app)))),
+        Line::from(styled(&app.theme, Role::Dim, format!("tema {}", app.theme))),
+    ];
+    Paragraph::new(lines).render(left_inner, buf);
+
+    let right = rounded_block(&app.theme, " comandos ", Role::Dim);
+    let right_inner = right.inner(cols[1]);
+    right.render(cols[1], buf);
+    let lines = vec![
+        Line::from(styled(&app.theme, Role::Dim, "/theme <t>  troca tema")),
+        Line::from(styled(&app.theme, Role::Dim, "/agents  status")),
+        Line::from(styled(&app.theme, Role::Dim, "/quit  sair")),
+        Line::from(styled(&app.theme, Role::Accent, "digite uma tarefa e o mestre orquestra")),
+    ];
+    Paragraph::new(lines).render(right_inner, buf);
 }
 
 fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let rows = area.height as usize;
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let rows = inner.height as usize;
     let msgs: Vec<Line> = app
         .chat
         .iter()
         .rev()
         .take(rows)
         .rev()
-        .map(|m| Line::from(styled(&app.theme, m.role.role(), m.text.clone())))
+        .map(|m| chat_line(app, m))
         .collect();
-    Paragraph::new(msgs).render(area, buf);
+    Paragraph::new(msgs).render(inner, buf);
+}
+
+fn chat_line(app: &App, m: &ChatMsg) -> Line<'static> {
+    match m.role {
+        ChatRole::User => Line::from(vec![
+            styled(&app.theme, Role::Accent, "> "),
+            styled(&app.theme, Role::Text, m.text.clone()),
+        ]),
+        ChatRole::Assistant => Line::from(vec![
+            styled(&app.theme, Role::Accent, "● "),
+            styled(&app.theme, Role::Text, m.text.clone()),
+        ]),
+        ChatRole::Tool => Line::from(styled(&app.theme, Role::Dim, format!("  ⚙ {}", m.text))),
+        ChatRole::Info => Line::from(styled(&app.theme, Role::Dim, m.text.clone())),
+        ChatRole::Error => Line::from(styled(&app.theme, Role::Fail, m.text.clone())),
+    }
 }
 
 fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(rgb(theme::color(&app.theme, Role::Dim))))
-        .title(Span::styled(" AGENTES ", Style::default().fg(rgb(theme::color(&app.theme, Role::Dim)))));
+    let block = rounded_block(&app.theme, " agentes ", Role::Accent);
     let inner = block.inner(area);
     block.render(area, buf);
 
@@ -354,8 +420,11 @@ fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
         app.agents
             .iter()
             .map(|a| {
-                let text = format!("{} {:<8} {:<8} {}", a.state.icon(), a.name, a.state.label(), a.last);
-                Line::from(styled(&app.theme, a.state.role(), text))
+                let text = format!("{} {:<8} {:<8} ", a.state.icon(), a.name, a.state.label());
+                Line::from(vec![
+                    styled(&app.theme, a.state.role(), text),
+                    styled(&app.theme, Role::Dim, a.last.clone()),
+                ])
             })
             .collect()
     };
@@ -363,10 +432,25 @@ fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
 }
 
 fn draw_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
+    let block = rounded_block(&app.theme, "", Role::Accent);
+    let inner = block.inner(area);
+    block.render(area, buf);
     let line = Line::from(vec![
         styled(&app.theme, Role::Accent, theme::prompt(&app.theme)).add_modifier(Modifier::BOLD),
         Span::raw(app.input.clone()),
         Span::raw("█"),
+    ]);
+    Paragraph::new(line).render(inner, buf);
+}
+
+fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
+    let line = Line::from(vec![
+        styled(&app.theme, Role::Accent, "mestre "),
+        styled(&app.theme, Role::Dim, format!("{}  ·  ", app.master)),
+        styled(&app.theme, Role::Dim, format!("{}  ·  ", repo_name(app))),
+        styled(&app.theme, Role::Accent, "tema "),
+        styled(&app.theme, Role::Dim, format!("{}  ·  ", app.theme)),
+        styled(&app.theme, Role::Dim, format!("{} agentes", app.agents.len())),
     ]);
     Paragraph::new(line).render(area, buf);
 }
