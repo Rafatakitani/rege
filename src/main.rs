@@ -8,7 +8,9 @@ mod engine;
 mod mcp;
 mod playbook;
 mod session;
+mod theme;
 mod tmux;
+mod tui;
 mod worktree;
 
 use anyhow::Result;
@@ -60,9 +62,8 @@ fn main() -> Result<()> {
         }
         Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
         None => {
-            // TUI (ratatui) chega no proximo bloco.
-            eprintln!("regente: TUI em construcao. Use `regente exec \"<tarefa>\"` ou `regente doctor`.");
-            Ok(())
+            let repo = cwd.to_string_lossy().to_string();
+            tui::run(&cfg, &repo)
         }
     }
 }
