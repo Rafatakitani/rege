@@ -22,6 +22,7 @@ Gem::Specification.new do |spec|
   spec.add_dependency "tty-prompt", "~> 0.23"
   spec.add_dependency "tty-box", "~> 0.7"
   spec.add_dependency "pastel", "~> 0.8"
+  spec.add_dependency "reline", "~> 0.5"
 
   spec.add_development_dependency "minitest", "~> 5.20"
   spec.add_development_dependency "rake", "~> 13.0"

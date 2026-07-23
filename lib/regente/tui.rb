@@ -15,7 +15,7 @@ module Regente
     FAILC  = [255, 107, 120].freeze  # red
 
     def initialize(config:, repo:, out: $stdout, color: true,
-                   launcher: nil, probe_runner: nil, exe: "regente")
+                   launcher: nil, probe_runner: nil, exe: "regente", driver: nil)
       @config = config
       @repo = repo
       @out = out
@@ -23,6 +23,7 @@ module Regente
       @launcher = launcher || ->(cmd, cwd) { system(*cmd, chdir: cwd) }
       @probe_runner = probe_runner
       @exe = exe
+      @driver = driver
     end
 
     # ---- pure renderers -------------------------------------------------
@@ -65,6 +66,25 @@ module Regente
 
     def prompt_label = bold(fg(ACCENT, "› "))
 
+    # Render a streamed master event to a line (nil = don't print).
+    def format_event(ev)
+      case ev.type
+      when :text then "#{fg(ACCENT, '●')} #{ev.text}"
+      when :tool then fg(DIMC, "  ⚙ #{ev.name} #{summarize(ev.input)}")
+      when :done then ev.cost ? fg(DIMC, format("  — $%.4f", ev.cost)) : nil
+      end
+    end
+
+    def summarize(input)
+      return "" unless input.is_a?(Hash)
+
+      input.map { |k, v| "#{k}=#{truncate(v.to_s)}" }.join(" ")
+    end
+
+    def truncate(str, max = 40)
+      str.length > max ? "#{str[0, max]}…" : str
+    end
+
     # ---- interactive loop ----------------------------------------------
 
     def run
@@ -90,18 +110,36 @@ module Regente
       case line
       when "/doctor" then show_health
       when "/config" then @out.puts(@config.data.to_yaml)
-      when "/attach" then run_master(nil)
+      when "/attach" then attach_external
       when "/help", "/?" then @out.puts(footer)
       when %r{\A/} then @out.puts(fg(FAILC, "comando desconhecido: #{line}"))
-      else run_master(line) # a task
+      else chat(line) # a task -> talk to the master, streamed into our TUI
       end
     end
 
-    def run_master(task)
-      prompt = Playbook.prompt(@config)
+    # Send a turn to the master and render the streamed reply natively.
+    def chat(text)
+      @out.puts("\n#{prompt_label}#{text}\n")
+      driver.send_turn(text) do |ev|
+        line = format_event(ev)
+        @out.puts(line) if line
+      end
+    rescue Regente::Error => e
+      @out.puts(fg(FAILC, e.message))
+    end
+
+    def driver
+      @driver ||= MasterDriver.new(cli: @config.master["cli"], repo: @repo,
+                                   prompt: Playbook.prompt(@config),
+                                   model: @config.master["model"], exe: @exe)
+    end
+
+    # Fallback: open the master's own CLI in tmux (non-claude masters).
+    def attach_external
       m = @config.master
-      cmd = Master.launch_string(cli: m["cli"], repo: @repo, prompt: prompt,
-                                 model: m["model"], task: task, exe: @exe)
+      cmd = Master.launch_string(cli: m["cli"], repo: @repo,
+                                 prompt: Playbook.prompt(@config),
+                                 model: m["model"], exe: @exe)
       leave_screen
       @launcher.call(["tmux", "new-session", "-A", "-s", CLI::MASTER_SESSION,
                       "-c", @repo, cmd], @repo)
@@ -119,6 +157,7 @@ module Regente
       @out.puts(banner)
       @out.puts
       @out.puts(header_box)
+      @out.puts(fg(DIMC, "  digite uma tarefa e o mestre orquestra — ou um comando:"))
       @out.puts(footer)
       @out.puts
     end
