@@ -1,0 +1,20 @@
+[package]
+name = "regente"
+version = "0.1.0"
+edition = "2021"
+description = "Orquestrador multi-agente de IAs: um mestre comanda CLIs de IA isolados em git worktree + tmux."
+license = "MIT"
+
+[[bin]]
+name = "regente"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+
+[profile.release]
+opt-level = 2
