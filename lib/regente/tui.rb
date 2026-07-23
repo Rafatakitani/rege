@@ -4,22 +4,17 @@ require "tty/box"
 require "reline"
 
 module Regente
-  # Full-screen terminal UI (alternate screen, like Claude Code). Shows a
-  # branded cockpit — master, repo, roster health — and takes a task, then
-  # hands off to the master session (tmux). Rendering is pure (testable);
-  # the interactive loop wraps it with the alternate screen + Reline input.
+  # Full-screen terminal UI with a hacker-terminal feel and real named themes
+  # (Regente::Theme). We render the master conversation natively (streamed),
+  # instead of handing off to an external CLI's interface.
   class TUI
-    ACCENT = [255, 122, 60].freeze   # dispatch orange
-    DIMC   = [115, 123, 134].freeze  # neutral
-    OKC    = [62, 199, 126].freeze   # green
-    FAILC  = [255, 107, 120].freeze  # red
-
     def initialize(config:, repo:, out: $stdout, color: true,
                    launcher: nil, probe_runner: nil, exe: "regente", driver: nil)
       @config = config
       @repo = repo
       @out = out
       @color = color
+      @theme = config.get("ui.theme") || Theme::DEFAULT
       @launcher = launcher || ->(cmd, cwd) { system(*cmd, chdir: cwd) }
       @probe_runner = probe_runner
       @exe = exe
@@ -36,15 +31,16 @@ module Regente
         ██   ██ ██      ██    ██ ██      ██  ██ ██    ██    ██
         ██   ██ ███████  ██████  ███████ ██   ████    ██    ███████
       LOGO
-      bold(fg(ACCENT, logo))
+      bold(paint(:accent, logo))
     end
 
     def header_box
       master = "#{@config.master['cli']} · #{@config.master['model']}"
       lines = [
-        "#{fg(DIMC, 'mestre')}   #{bold(master)}",
-        "#{fg(DIMC, 'repo')}     #{bold(File.basename(@repo))}",
-        "#{fg(DIMC, 'workers')}  #{@config.workers.map { |w| w['cli'] }.join(', ')}"
+        "#{paint(:dim, 'mestre')}   #{bold(paint(:text, master))}",
+        "#{paint(:dim, 'repo')}     #{bold(paint(:text, File.basename(@repo)))}",
+        "#{paint(:dim, 'tema')}     #{paint(:accent2, @theme)}",
+        "#{paint(:dim, 'workers')}  #{paint(:text, @config.workers.map { |w| w['cli'] }.join(', '))}"
       ]
       TTY::Box.frame(*lines, padding: [0, 1], title: { top_left: " regente " },
                              style: { border: { fg: :bright_black } })
@@ -52,26 +48,25 @@ module Regente
 
     def health_lines(results)
       results.map do |cli, ok|
-        dot = ok ? fg(OKC, "●") : fg(FAILC, "●")
-        state = ok ? fg(DIMC, "ok") : fg(FAILC, "sem resposta")
+        dot = ok ? paint(:ok, "●") : paint(:fail, "●")
+        state = ok ? paint(:dim, "ok") : paint(:fail, "sem resposta")
         "  #{dot} #{cli.ljust(10)} #{state}"
       end.join("\n")
     end
 
     def footer
-      keys = [["/doctor", "checar bots"], ["/config", "ver config"],
-              ["/attach", "sessão do mestre"], ["/quit", "sair"]]
-      fg(DIMC, keys.map { |k, d| "#{k} #{d}" }.join("   ·   "))
+      keys = [["/theme", "trocar tema"], ["/doctor", "checar bots"],
+              ["/config", "config"], ["/attach", "sessão externa"], ["/quit", "sair"]]
+      paint(:dim, keys.map { |k, d| "#{k} #{d}" }.join("   ·   "))
     end
 
-    def prompt_label = bold(fg(ACCENT, "› "))
+    def prompt_label = bold(paint(:accent, Theme.prompt(@theme)))
 
-    # Render a streamed master event to a line (nil = don't print).
     def format_event(ev)
       case ev.type
-      when :text then "#{fg(ACCENT, '●')} #{ev.text}"
-      when :tool then fg(DIMC, "  ⚙ #{ev.name} #{summarize(ev.input)}")
-      when :done then ev.cost ? fg(DIMC, format("  — $%.4f", ev.cost)) : nil
+      when :text then "#{paint(:accent, '●')} #{ev.text}"
+      when :tool then paint(:dim, "  ⚙ #{ev.name} #{summarize(ev.input)}")
+      when :done then ev.cost ? paint(:dim, format("  — $%.4f", ev.cost)) : nil
       end
     end
 
@@ -110,14 +105,27 @@ module Regente
       case line
       when "/doctor" then show_health
       when "/config" then @out.puts(@config.data.to_yaml)
+      when %r{\A/theme\b} then cmd_theme(line.split[1])
       when "/attach" then attach_external
       when "/help", "/?" then @out.puts(footer)
-      when %r{\A/} then @out.puts(fg(FAILC, "comando desconhecido: #{line}"))
-      else chat(line) # a task -> talk to the master, streamed into our TUI
+      when %r{\A/} then @out.puts(paint(:fail, "comando desconhecido: #{line}"))
+      else chat(line)
       end
     end
 
-    # Send a turn to the master and render the streamed reply natively.
+    def cmd_theme(name)
+      if name.nil?
+        @out.puts(paint(:dim, "temas: #{Theme.names.join(', ')}  (atual: #{@theme})"))
+      elsif Theme.exist?(name)
+        @theme = name
+        @config.set("ui.theme", name)
+        @config.save_project
+        draw_home
+      else
+        @out.puts(paint(:fail, "tema inexistente: #{name}"))
+      end
+    end
+
     def chat(text)
       @out.puts("\n#{prompt_label}#{text}\n")
       driver.send_turn(text) do |ev|
@@ -125,7 +133,7 @@ module Regente
         @out.puts(line) if line
       end
     rescue Regente::Error => e
-      @out.puts(fg(FAILC, e.message))
+      @out.puts(paint(:fail, e.message))
     end
 
     def driver
@@ -134,7 +142,6 @@ module Regente
                                    model: @config.master["model"], exe: @exe)
     end
 
-    # Fallback: open the master's own CLI in tmux (non-claude masters).
     def attach_external
       m = @config.master
       cmd = Master.launch_string(cli: m["cli"], repo: @repo,
@@ -157,7 +164,7 @@ module Regente
       @out.puts(banner)
       @out.puts
       @out.puts(header_box)
-      @out.puts(fg(DIMC, "  digite uma tarefa e o mestre orquestra — ou um comando:"))
+      @out.puts(paint(:dim, "  digite uma tarefa e o mestre orquestra — ou um comando:"))
       @out.puts(footer)
       @out.puts
     end
@@ -170,8 +177,10 @@ module Regente
 
     # ---- ANSI helpers ---------------------------------------------------
 
+    def paint(role, text) = fg(Theme.color(@theme, role), text)
+
     def fg(rgb, text)
-      return text unless @color
+      return text unless @color && rgb
 
       "\e[38;2;#{rgb[0]};#{rgb[1]};#{rgb[2]}m#{text}\e[0m"
     end

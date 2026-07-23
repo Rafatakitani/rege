@@ -46,6 +46,10 @@ module Regente
       "sandbox" => {
         "enabled" => true,
         "yolo" => true # auto-approve everything, zero prompts, confined to worktree
+      },
+
+      "ui" => {
+        "theme" => "hacker" # see Regente::Theme::PALETTES
       }
     }.freeze
 
