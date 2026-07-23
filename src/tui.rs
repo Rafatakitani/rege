@@ -6,6 +6,7 @@
 use crate::config::Config;
 use crate::driver;
 use crate::playbook;
+use crate::sessions::{self, SessionRec};
 use crate::stream;
 use crate::theme::{self, Role};
 use anyhow::Result;
@@ -99,6 +100,7 @@ struct ChatMsg {
 enum Mode {
     Normal,
     ThemePicker { cursor: usize },
+    ResumePicker { cursor: usize },
 }
 
 struct App {
@@ -118,6 +120,10 @@ struct App {
     buddy_tick: usize,
     session_id: Option<String>,
     rx: Option<Receiver<stream::Event>>,
+    sessions_path: PathBuf,
+    session_recorded: bool,
+    pending_title: Option<String>,
+    resume_list: Vec<SessionRec>,
 }
 
 impl App {
@@ -147,6 +153,10 @@ impl App {
             buddy_tick: 0,
             session_id: None,
             rx: None,
+            sessions_path: sessions::default_path(),
+            session_recorded: false,
+            pending_title: None,
+            resume_list: Vec::new(),
         }
     }
 
@@ -169,7 +179,7 @@ impl App {
     fn active_theme(&self) -> &str {
         match self.mode {
             Mode::ThemePicker { cursor } => theme::names()[cursor],
-            Mode::Normal => &self.theme,
+            Mode::Normal | Mode::ResumePicker { .. } => &self.theme,
         }
     }
 
@@ -201,6 +211,36 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    fn open_resume_picker(&mut self) {
+        self.resume_list = sessions::recent(&self.sessions_path, 12);
+        self.mode = Mode::ResumePicker { cursor: 0 };
+    }
+
+    fn resume_picker_move(&mut self, delta: isize) {
+        if let Mode::ResumePicker { cursor } = self.mode {
+            if self.resume_list.is_empty() {
+                return;
+            }
+            let next = (cursor as isize + delta).clamp(0, self.resume_list.len() as isize - 1);
+            self.mode = Mode::ResumePicker { cursor: next as usize };
+        }
+    }
+
+    fn resume_picker_confirm(&mut self) {
+        if let Mode::ResumePicker { cursor } = self.mode {
+            if let Some(rec) = self.resume_list.get(cursor) {
+                let title = rec.title.clone();
+                self.session_id = Some(rec.id.clone());
+                self.push(ChatRole::Info, format!("retomando sessão: {title}"));
+            }
+            self.mode = Mode::Normal;
+        }
+    }
+
+    fn resume_picker_cancel(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
     fn submit(&mut self) {
         let line = self.input.trim().to_string();
         self.input.clear();
@@ -210,6 +250,9 @@ impl App {
         if line.starts_with('/') {
             self.dispatch(&line);
             return;
+        }
+        if self.pending_title.is_none() {
+            self.pending_title = Some(truncate_title(&line));
         }
         self.push(ChatRole::User, line.clone());
         self.spawn_turn(line);
@@ -257,7 +300,17 @@ impl App {
 
     fn handle_stream_event(&mut self, event: stream::Event) {
         match event {
-            stream::Event::Ready { session_id } => self.session_id = Some(session_id),
+            stream::Event::Ready { session_id } => {
+                if !self.session_recorded {
+                    let title = self.pending_title.clone().unwrap_or_else(|| "(sem título)".to_string());
+                    sessions::add(
+                        &self.sessions_path,
+                        SessionRec { id: session_id.clone(), title, repo: self.repo.clone(), ts: sessions::now_ts() },
+                    );
+                    self.session_recorded = true;
+                }
+                self.session_id = Some(session_id);
+            }
             stream::Event::Text(text) => self.push(ChatRole::Assistant, text),
             stream::Event::Tool { name, .. } => self.push(ChatRole::Tool, name),
             stream::Event::ToolResult(text) => self.push(ChatRole::Info, text),
@@ -285,6 +338,7 @@ impl App {
                     self.push(ChatRole::Error, format!("tema inexistente: {name}"));
                 }
             },
+            "/resume" => self.open_resume_picker(),
             "/agents" => {
                 if self.agents.is_empty() {
                     self.push(ChatRole::Info, "nenhum agente ativo");
@@ -318,6 +372,31 @@ impl App {
                 self.push(ChatRole::Error, format!("comando desconhecido: {other}"));
             }
         }
+    }
+}
+
+/// Truncates a session title candidate to ~60 chars, appending "..." when cut.
+fn truncate_title(text: &str) -> String {
+    const MAX: usize = 60;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(MAX).collect();
+    format!("{truncated}...")
+}
+
+/// Coarse relative-time label ("agora", "2h", "3d") for a past `ts` (unix
+/// seconds) compared to `now`.
+fn rel_time(ts: u64, now: u64) -> String {
+    let secs = now.saturating_sub(ts);
+    if secs < 60 {
+        "agora".to_string()
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
     }
 }
 
@@ -492,6 +571,13 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                         KeyCode::Esc => app.picker_cancel(),
                         _ => {}
                     },
+                    Mode::ResumePicker { .. } => match key.code {
+                        KeyCode::Up => app.resume_picker_move(-1),
+                        KeyCode::Down => app.resume_picker_move(1),
+                        KeyCode::Enter => app.resume_picker_confirm(),
+                        KeyCode::Esc => app.resume_picker_cancel(),
+                        _ => {}
+                    },
                     Mode::Normal => match key.code {
                         KeyCode::Char(c) => app.input.push(c),
                         KeyCode::Backspace => {
@@ -558,6 +644,9 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
 
     if let Mode::ThemePicker { cursor } = app.mode {
         draw_theme_picker(area, buf, app, cursor);
+    }
+    if let Mode::ResumePicker { cursor } = app.mode {
+        draw_resume_picker(area, buf, app, cursor);
     }
 }
 
@@ -776,6 +865,44 @@ fn draw_theme_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, c
     }
 
     lines.push(Line::from(styled(theme, Role::Dim, "Enter seleciona · Esc cancela")));
+    Paragraph::new(lines).render(inner, buf);
+}
+
+fn draw_resume_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cursor: usize) {
+    let theme = app.active_theme();
+    let list_height = app.resume_list.len().max(1) as u16;
+    let height = list_height + 6;
+    let rect = centered_rect(60, height, area);
+
+    // Clear the popup area so the background chat text doesn't bleed through.
+    Paragraph::new("").render(rect, buf);
+
+    let block = rounded_block(theme, " sessoes ", Role::Dim);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(styled(theme, Role::Text, "Retomar sessão").add_modifier(Modifier::BOLD)));
+    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter retoma · Esc cancela")));
+
+    if app.resume_list.is_empty() {
+        lines.push(Line::from(styled(theme, Role::Dim, "nenhuma sessão anterior")));
+    } else {
+        let now = sessions::now_ts();
+        for (i, rec) in app.resume_list.iter().enumerate() {
+            let chevron = if i == cursor { styled(theme, Role::Accent, "❯ ") } else { styled(theme, Role::Dim, "  ") };
+            let short_id: String = rec.id.chars().take(8).collect();
+            let text = format!("{}  ·  {}  ·  há {}", rec.title, short_id, rel_time(rec.ts, now));
+            let span = if i == cursor {
+                styled(theme, Role::Accent, text).add_modifier(Modifier::BOLD)
+            } else {
+                styled(theme, Role::Text, text)
+            };
+            lines.push(Line::from(vec![chevron, span]));
+        }
+    }
+
+    lines.push(Line::from(styled(theme, Role::Dim, "Enter retoma · Esc cancela")));
     Paragraph::new(lines).render(inner, buf);
 }
 

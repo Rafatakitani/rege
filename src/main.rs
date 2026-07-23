@@ -10,6 +10,7 @@ mod engine;
 mod mcp;
 mod playbook;
 mod session;
+mod sessions;
 mod stream;
 mod theme;
 mod tmux;
