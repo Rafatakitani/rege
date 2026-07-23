@@ -68,9 +68,10 @@ class TUITest < Minitest::Test
       end
       t = Regente::TUI.new(config: cfg, repo: repo, out: out, color: false, driver: fake_driver)
       t.send(:chat, "corrige o bug")
-      assert_includes out.string, "corrige o bug" # user echo
+      # Reline echoes the user input; chat() only streams the reply
       assert_includes out.string, "analisando"    # assistant text
       assert_includes out.string, "spawn_agent"   # tool activity
+      assert_includes out.string, "0.0200"        # done cost
     end
   end
 
