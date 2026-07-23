@@ -3,7 +3,7 @@
 require_relative "regente/version"
 require_relative "regente/config"
 # Additional subsystems are required here as they are implemented:
-%w[worktree tmux agent engine pr].each do |mod|
+%w[worktree tmux agent engine pr session].each do |mod|
   path = File.join(__dir__, "regente", "#{mod}.rb")
   require path if File.exist?(path)
 end
