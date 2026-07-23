@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 Rafa Takitani
+Copyright (c) 2026 Rafael Takitani
 
 Portions of this software (the `/buddy` feature, `src/buddy.rs`) are derived from
 claude-buddy (https://github.com/ramarivera/claude-buddy), Copyright (c) ramarivera,
