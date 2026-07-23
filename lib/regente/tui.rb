@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
+require "io/console"
 require "tty/box"
-require "reline"
 
 module Regente
   # Full-screen terminal UI with a hacker-terminal feel and real named themes
@@ -102,61 +102,97 @@ module Regente
 
     # ---- interactive loop ----------------------------------------------
 
-    def run
-      enter_screen
-      draw_home
-      loop do
-        line = read_line
-        break if line.nil?
-
-        line = line.strip
-        next if line.empty?
-        break if %w[/quit /q exit].include?(line)
-
-        dispatch(line)
+    # Full-screen loop: fixed regions (chat + pinned AGENTES dashboard + input),
+    # raw single-key input, idle poll to refresh worker status. Blind-built —
+    # the pure Screen.compose is what's tested.
+    def run(input: $stdin)
+      @in = input
+      @chat = []
+      @input = ""
+      say(:info, "Regente pronto. Digite uma tarefa. /help pros comandos, /quit sai.")
+      refresh_agents
+      with_screen do
+        redraw
+        loop do
+          key = read_key(0.6)
+          if key.nil?
+            refresh_agents
+            redraw
+            next
+          end
+          break if handle_key(key) == :quit
+        end
       end
-    ensure
-      leave_screen
     end
 
     private
 
+    def handle_key(key)
+      case key
+      when "", "" then :quit          # ctrl-c / ctrl-d
+      when "\r", "\n" then submit
+      when "", "\b" then @input = @input[0..-2].to_s; redraw; nil
+      else
+        @input += key if key =~ /[[:print:]]/
+        redraw
+        nil
+      end
+    end
+
+    def submit
+      line = @input.strip
+      @input = ""
+      redraw
+      return nil if line.empty?
+      return :quit if %w[/quit /q exit].include?(line)
+
+      say(:user, "#{Theme.prompt(@theme)}#{line}")
+      dispatch(line)
+      nil
+    end
+
     def dispatch(line)
       case line
       when "/doctor" then show_health
-      when "/config" then @out.puts(@config.data.to_yaml)
+      when "/config" then @config.data.to_yaml.each_line { |l| push(:info, l.chomp) }; redraw
       when %r{\A/theme\b} then cmd_theme(line.split[1])
-      when "/agents", "/ps" then @out.puts(render_dashboard)
+      when "/agents", "/ps" then refresh_agents; redraw
       when "/attach" then attach_external
-      when "/help", "/?" then @out.puts(footer)
-      when %r{\A/} then @out.puts(paint(:fail, "comando desconhecido: #{line}"))
+      when "/help", "/?" then say(:info, "comandos: /agents /theme <t> /doctor /config /attach /quit")
+      when %r{\A/} then say(:error, "comando desconhecido: #{line}")
       else chat(line)
       end
     end
 
     def cmd_theme(name)
       if name.nil?
-        @out.puts(paint(:dim, "temas: #{Theme.names.join(', ')}  (atual: #{@theme})"))
+        say(:info, "temas: #{Theme.names.join(', ')}  (atual: #{@theme})")
       elsif Theme.exist?(name)
         @theme = name
         @config.set("ui.theme", name)
         @config.save_project
-        draw_home
+        redraw
       else
-        @out.puts(paint(:fail, "tema inexistente: #{name}"))
+        say(:error, "tema inexistente: #{name}")
       end
     end
 
     def chat(text)
-      # Reline already echoed the prompt+input; just stream the reply.
-      @out.puts
       driver.send_turn(text) do |ev|
-        line = format_event(ev)
-        @out.puts(line) if line
+        push_event(ev)
+        refresh_agents
+        redraw
       end
-      @out.puts(render_dashboard) # show worker status after the turn
     rescue Regente::Error => e
-      @out.puts(paint(:fail, e.message))
+      say(:error, e.message)
+    end
+
+    def push_event(ev)
+      case ev.type
+      when :text then push(:assistant, "● #{ev.text}")
+      when :tool then push(:tool, "  ⚙ #{ev.name} #{summarize(ev.input)}")
+      when :done then push(:cost, format("  — $%.4f", ev.cost)) if ev.cost
+      end
     end
 
     def driver
@@ -169,6 +205,12 @@ module Regente
       @dashboard ||= Dashboard.new
     end
 
+    def refresh_agents
+      @agents = dashboard.workers
+    rescue StandardError
+      @agents = []
+    end
+
     def attach_external
       m = @config.master
       cmd = Master.launch_string(cli: m["cli"], repo: @repo,
@@ -178,29 +220,60 @@ module Regente
       @launcher.call(["tmux", "new-session", "-A", "-s", CLI::MASTER_SESSION,
                       "-c", @repo, cmd], @repo)
       enter_screen
-      draw_home
+      redraw
     end
 
     def show_health
       engine = Engine.new(repo: @repo, config: @config, probe_runner: @probe_runner)
-      @out.puts(health_lines(engine.health_check))
+      engine.health_check.each { |cli, ok| push(:info, "  #{ok ? '●' : '✗'} #{cli} #{ok ? 'ok' : 'sem resposta'}") }
+      redraw
     end
 
-    def draw_home
-      clear
-      @out.puts(banner)
-      @out.puts
-      @out.puts(header_box)
-      @out.puts(paint(:dim, "  digite uma tarefa e o mestre orquestra — ou um comando:"))
-      @out.puts(footer)
-      @out.puts
+    # ---- screen plumbing ----
+
+    def say(role, text)
+      push(role, text)
+      redraw
     end
 
-    def read_line
-      @out.puts # blank line above the prompt (never inside the Reline prompt)
-      Reline.readline(prompt_label, true)
-    rescue Interrupt
+    def push(role, text)
+      (@chat ||= []) << { role: role, text: text }
+    end
+
+    def redraw
+      rows, cols = dims
+      master = "#{@config.master['cli']} · #{@config.master['model']}"
+      @out.print(Screen.compose(width: cols, height: rows, theme: @theme,
+                                master: master, repo: @repo, chat: @chat || [],
+                                agents: @agents || [], input: @input || "", color: @color))
+    end
+
+    def dims
+      if @out.respond_to?(:winsize)
+        @out.winsize
+      else
+        [24, 80]
+      end
+    rescue StandardError
+      [24, 80]
+    end
+
+    def read_key(timeout)
+      return nil unless IO.select([@in], nil, nil, timeout)
+
+      @in.getc
+    rescue IOError
       nil
+    end
+
+    def with_screen
+      enter_screen
+      @out.print("\e[?25l") # hide cursor
+      raw = @in.respond_to?(:raw) && @in.tty?
+      raw ? @in.raw { yield } : yield
+    ensure
+      @out.print("\e[?25h") # show cursor
+      leave_screen
     end
 
     # ---- ANSI helpers ---------------------------------------------------
