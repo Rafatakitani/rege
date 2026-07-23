@@ -1,5 +1,5 @@
-//! Full-screen ratatui app: fixed layout (top bar, scrolling chat, pinned
-//! AGENTES dashboard, input line). Porta `legacy/lib/regente/tui.rb` +
+//! Full-screen ratatui app: fixed layout (header line, scrolling chat, pinned
+//! AGENTES dashboard, input line, status line). Porta `legacy/lib/regente/tui.rb` +
 //! `screen.rb` + `dashboard.rb`. No streaming yet — Enter just echoes the
 //! turn into chat as a placeholder until the master driver lands.
 
@@ -12,7 +12,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
@@ -33,8 +33,8 @@ enum AgentState {
 impl AgentState {
     fn icon(self) -> &'static str {
         match self {
-            AgentState::Running => "◍",
-            AgentState::Done => "●",
+            AgentState::Running => "●",
+            AgentState::Done => "✓",
             AgentState::Failed => "✗",
             AgentState::Unknown => "○",
         }
@@ -52,7 +52,7 @@ impl AgentState {
     fn role(self) -> Role {
         match self {
             AgentState::Running => Role::Warn,
-            AgentState::Done => Role::Ok,
+            AgentState::Done => Role::Accent,
             AgentState::Failed => Role::Fail,
             AgentState::Unknown => Role::Dim,
         }
@@ -91,8 +91,15 @@ struct ChatMsg {
     text: String,
 }
 
+/// UI mode: normal chat input, or the interactive theme picker overlay.
+enum Mode {
+    Normal,
+    ThemePicker { cursor: usize },
+}
+
 struct App {
     theme: String,
+    mode: Mode,
     master: String,
     repo: String,
     chat: Vec<ChatMsg>,
@@ -106,16 +113,17 @@ impl App {
     fn new(config: &Config, repo: &str) -> App {
         let theme = config.ui.get("theme").cloned().unwrap_or_else(|| theme::DEFAULT.to_string());
         let master = match &config.master.model {
-            Some(m) => format!("{} · {}", config.master.cli, m),
+            Some(m) => format!("{}/{}", config.master.cli, m),
             None => config.master.cli.clone(),
         };
         App {
             theme,
+            mode: Mode::Normal,
             master,
             repo: repo.to_string(),
             chat: vec![ChatMsg {
                 role: ChatRole::Info,
-                text: "Regente pronto. Digite uma tarefa. /theme <t> troca tema, /quit sai.".into(),
+                text: "Regente pronto. Digite uma tarefa. /theme abre o seletor, /quit sai.".into(),
             }],
             input: String::new(),
             agents: Vec::new(),
@@ -132,6 +140,43 @@ impl App {
         self.agents = list_agents(&self.logdir, &self.master_session);
     }
 
+    /// Theme currently rendered — the picker's cursor previews live, so this
+    /// diverges from `self.theme` only while `Mode::ThemePicker` is open.
+    fn active_theme(&self) -> &str {
+        match self.mode {
+            Mode::ThemePicker { cursor } => theme::names()[cursor],
+            Mode::Normal => &self.theme,
+        }
+    }
+
+    fn open_theme_picker(&mut self) {
+        let cursor = theme::names().iter().position(|n| *n == self.theme).unwrap_or(0);
+        self.mode = Mode::ThemePicker { cursor };
+    }
+
+    fn picker_move(&mut self, delta: isize) {
+        if let Mode::ThemePicker { cursor } = self.mode {
+            let names = theme::names();
+            let next = (cursor as isize + delta).clamp(0, names.len() as isize - 1);
+            self.mode = Mode::ThemePicker { cursor: next as usize };
+        }
+    }
+
+    fn picker_confirm(&mut self) {
+        if let Mode::ThemePicker { cursor } = self.mode {
+            let name = theme::names()[cursor].to_string();
+            self.theme = name.clone();
+            if let Err(e) = save_theme_to_config(&name) {
+                self.push(ChatRole::Error, format!("erro ao salvar tema: {e}"));
+            }
+            self.mode = Mode::Normal;
+        }
+    }
+
+    fn picker_cancel(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
     fn submit(&mut self) {
         let line = self.input.trim().to_string();
         self.input.clear();
@@ -142,7 +187,7 @@ impl App {
             self.dispatch(&line);
             return;
         }
-        self.push(ChatRole::User, format!("{}{}", theme::prompt(&self.theme), line));
+        self.push(ChatRole::User, line);
         self.push(ChatRole::Assistant, "(streaming em breve)");
     }
 
@@ -151,10 +196,7 @@ impl App {
         match parts.next().unwrap_or("") {
             "/quit" | "/q" => {}
             "/theme" => match parts.next() {
-                None => {
-                    let msg = format!("temas: {}  (atual: {})", theme::names().join(", "), self.theme);
-                    self.push(ChatRole::Info, msg);
-                }
+                None => self.open_theme_picker(),
                 Some(name) if theme::exists(name) => {
                     self.theme = name.to_string();
                 }
@@ -247,6 +289,42 @@ fn strip_sentinel(log: &str) -> String {
     }
 }
 
+fn config_home() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Persist `ui.theme` into the global config, deep-merging so unrelated keys
+/// (and other `ui.*` entries) survive.
+fn save_theme_to_config(theme: &str) -> Result<()> {
+    let path = Config::global_path(&config_home());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut value: serde_yaml::Value = if path.exists() {
+        let text = std::fs::read_to_string(&path)?;
+        if text.trim().is_empty() {
+            serde_yaml::Value::Mapping(Default::default())
+        } else {
+            serde_yaml::from_str(&text)?
+        }
+    } else {
+        serde_yaml::Value::Mapping(Default::default())
+    };
+    if !value.is_mapping() {
+        value = serde_yaml::Value::Mapping(Default::default());
+    }
+    let map = value.as_mapping_mut().expect("just ensured mapping");
+    let ui_key = serde_yaml::Value::String("ui".into());
+    let mut ui_map = match map.get(&ui_key).and_then(|v| v.as_mapping()) {
+        Some(m) => m.clone(),
+        None => serde_yaml::Mapping::new(),
+    };
+    ui_map.insert(serde_yaml::Value::String("theme".into()), serde_yaml::Value::String(theme.into()));
+    map.insert(ui_key, serde_yaml::Value::Mapping(ui_map));
+    std::fs::write(&path, serde_yaml::to_string(&value)?)?;
+    Ok(())
+}
+
 /// Entry point: run the fullscreen TUI until the user quits.
 pub fn run(config: &Config, repo: &str) -> Result<()> {
     enable_raw_mode()?;
@@ -280,21 +358,32 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Char(c) => app.input.push(c),
-                    KeyCode::Backspace => {
-                        app.input.pop();
-                    }
-                    KeyCode::Enter => {
-                        let line = app.input.trim().to_string();
-                        if line == "/quit" || line == "/q" {
-                            break;
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    break;
+                }
+                match app.mode {
+                    Mode::ThemePicker { .. } => match key.code {
+                        KeyCode::Up => app.picker_move(-1),
+                        KeyCode::Down => app.picker_move(1),
+                        KeyCode::Enter => app.picker_confirm(),
+                        KeyCode::Esc => app.picker_cancel(),
+                        _ => {}
+                    },
+                    Mode::Normal => match key.code {
+                        KeyCode::Char(c) => app.input.push(c),
+                        KeyCode::Backspace => {
+                            app.input.pop();
                         }
-                        app.submit();
-                    }
-                    KeyCode::Esc => break,
-                    _ => {}
+                        KeyCode::Enter => {
+                            let line = app.input.trim().to_string();
+                            if line == "/quit" || line == "/q" {
+                                break;
+                            }
+                            app.submit();
+                        }
+                        KeyCode::Esc => break,
+                        _ => {}
+                    },
                 }
             }
         }
@@ -324,62 +413,43 @@ fn rounded_block(theme: &str, title: &str, role: Role) -> Block<'static> {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color))
-        .title(Span::styled(title.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(title.to_string(), Style::default().fg(color)))
 }
 
 fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let outer = Layout::default().margin(1).constraints([Constraint::Min(0)]).split(area)[0];
+    let theme = app.active_theme();
     let chunks = Layout::vertical([
-        Constraint::Length(6),
+        Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(6),
         Constraint::Length(3),
         Constraint::Length(1),
     ])
-    .split(outer);
+    .split(area);
 
-    draw_header(chunks[0], buf, app);
-    draw_chat(chunks[1], buf, app);
-    draw_agents(chunks[2], buf, app);
-    draw_input(chunks[3], buf, app);
-    draw_statusbar(chunks[4], buf, app);
+    draw_header(chunks[0], buf, app, theme);
+    draw_chat(chunks[1], buf, app, theme);
+    draw_agents(chunks[2], buf, app, theme);
+    draw_input(chunks[3], buf, app, theme);
+    draw_statusbar(chunks[4], buf, app, theme);
+
+    if let Mode::ThemePicker { cursor } = app.mode {
+        draw_theme_picker(area, buf, app, cursor);
+    }
 }
 
-fn draw_header(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-
-    let left = rounded_block(&app.theme, " regente ", Role::Accent);
-    let left_inner = left.inner(cols[0]);
-    left.render(cols[0], buf);
-    let lines = vec![
-        Line::from(styled(&app.theme, Role::Accent, "REGENTE").add_modifier(Modifier::BOLD)),
-        Line::from(styled(&app.theme, Role::Dim, format!("mestre {}", app.master))),
-        Line::from(styled(&app.theme, Role::Dim, format!("repo {}", repo_name(app)))),
-        Line::from(styled(&app.theme, Role::Dim, format!("tema {}", app.theme))),
-    ];
-    Paragraph::new(lines).render(left_inner, buf);
-
-    let right = rounded_block(&app.theme, " comandos ", Role::Dim);
-    let right_inner = right.inner(cols[1]);
-    right.render(cols[1], buf);
-    let lines = vec![
-        Line::from(styled(&app.theme, Role::Dim, "/theme <t>  troca tema")),
-        Line::from(styled(&app.theme, Role::Dim, "/agents  status")),
-        Line::from(styled(&app.theme, Role::Dim, "/quit  sair")),
-        Line::from(styled(&app.theme, Role::Accent, "digite uma tarefa e o mestre orquestra")),
-    ];
-    Paragraph::new(lines).render(right_inner, buf);
+fn draw_header(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
+    let suffix = format!(" · {} · ~/{} · {}", app.master, repo_name(app), theme);
+    let line = Line::from(vec![styled(theme, Role::Accent, "regente"), styled(theme, Role::Dim, suffix)]);
+    Paragraph::new(line).render(area, buf);
 }
 
-fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
+fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
+        x: area.x + 2,
+        y: area.y,
+        width: area.width.saturating_sub(4),
+        height: area.height,
     };
     let rows = inner.height as usize;
     let msgs: Vec<Line> = app
@@ -388,42 +458,42 @@ fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
         .rev()
         .take(rows)
         .rev()
-        .map(|m| chat_line(app, m))
+        .map(|m| chat_line(theme, m))
         .collect();
     Paragraph::new(msgs).render(inner, buf);
 }
 
-fn chat_line(app: &App, m: &ChatMsg) -> Line<'static> {
+fn chat_line(theme: &str, m: &ChatMsg) -> Line<'static> {
     match m.role {
         ChatRole::User => Line::from(vec![
-            styled(&app.theme, Role::Accent, "> "),
-            styled(&app.theme, Role::Text, m.text.clone()),
+            styled(theme, Role::Accent, "❯ "),
+            styled(theme, Role::Text, m.text.clone()),
         ]),
         ChatRole::Assistant => Line::from(vec![
-            styled(&app.theme, Role::Accent, "● "),
-            styled(&app.theme, Role::Text, m.text.clone()),
+            styled(theme, Role::Accent, "● "),
+            styled(theme, Role::Text, m.text.clone()),
         ]),
-        ChatRole::Tool => Line::from(styled(&app.theme, Role::Dim, format!("  ⚙ {}", m.text))),
-        ChatRole::Info => Line::from(styled(&app.theme, Role::Dim, m.text.clone())),
-        ChatRole::Error => Line::from(styled(&app.theme, Role::Fail, m.text.clone())),
+        ChatRole::Tool => Line::from(styled(theme, Role::Dim, format!("  ⚙ {}", m.text))),
+        ChatRole::Info => Line::from(styled(theme, Role::Dim, m.text.clone())),
+        ChatRole::Error => Line::from(styled(theme, Role::Fail, m.text.clone())),
     }
 }
 
-fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let block = rounded_block(&app.theme, " agentes ", Role::Accent);
+fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
+    let block = rounded_block(theme, " agentes ", Role::Dim);
     let inner = block.inner(area);
     block.render(area, buf);
 
     let lines: Vec<Line> = if app.agents.is_empty() {
-        vec![Line::from(styled(&app.theme, Role::Dim, "nenhum agente ativo"))]
+        vec![Line::from(styled(theme, Role::Dim, "nenhum agente ativo"))]
     } else {
         app.agents
             .iter()
             .map(|a| {
                 let text = format!("{} {:<8} {:<8} ", a.state.icon(), a.name, a.state.label());
                 Line::from(vec![
-                    styled(&app.theme, a.state.role(), text),
-                    styled(&app.theme, Role::Dim, a.last.clone()),
+                    styled(theme, a.state.role(), text),
+                    styled(theme, Role::Dim, a.last.clone()),
                 ])
             })
             .collect()
@@ -431,28 +501,80 @@ fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
     Paragraph::new(lines).render(inner, buf);
 }
 
-fn draw_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let block = rounded_block(&app.theme, "", Role::Accent);
+fn draw_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
+    let block = rounded_block(theme, "", Role::Dim);
     let inner = block.inner(area);
     block.render(area, buf);
     let line = Line::from(vec![
-        styled(&app.theme, Role::Accent, theme::prompt(&app.theme)).add_modifier(Modifier::BOLD),
-        Span::raw(app.input.clone()),
-        Span::raw("█"),
+        styled(theme, Role::Accent, "❯ "),
+        styled(theme, Role::Text, app.input.clone()),
+        styled(theme, Role::Neon, "█"),
     ]);
     Paragraph::new(line).render(inner, buf);
 }
 
-fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
+fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
+    let running = app.agents.iter().filter(|a| a.state == AgentState::Running).count();
+    let ready = app.agents.iter().filter(|a| a.state == AgentState::Done).count();
     let line = Line::from(vec![
-        styled(&app.theme, Role::Accent, "mestre "),
-        styled(&app.theme, Role::Dim, format!("{}  ·  ", app.master)),
-        styled(&app.theme, Role::Dim, format!("{}  ·  ", repo_name(app))),
-        styled(&app.theme, Role::Accent, "tema "),
-        styled(&app.theme, Role::Dim, format!("{}  ·  ", app.theme)),
-        styled(&app.theme, Role::Dim, format!("{} agentes", app.agents.len())),
+        styled(theme, Role::Accent, running.to_string()),
+        styled(theme, Role::Dim, " rodando · "),
+        styled(theme, Role::Accent, ready.to_string()),
+        styled(theme, Role::Dim, " pronto · /theme · /agents · /model · /quit"),
     ]);
     Paragraph::new(line).render(area, buf);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+fn draw_theme_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cursor: usize) {
+    let names = theme::names();
+    let theme = app.active_theme();
+    let height = names.len() as u16 + 5;
+    let rect = centered_rect(46, height, area);
+
+    // Clear the popup area so the background chat text doesn't bleed through.
+    Paragraph::new("").render(rect, buf);
+
+    let block = rounded_block(theme, " tema ", Role::Dim);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(styled(theme, Role::Text, "Escolha o tema").add_modifier(Modifier::BOLD)));
+    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter seleciona · Esc cancela")));
+
+    for (i, name) in names.iter().enumerate() {
+        let chevron = if i == cursor { styled(theme, Role::Accent, "❯ ") } else { styled(theme, Role::Dim, "  ") };
+        let index = styled(theme, Role::Dim, format!("{:>2} ", i + 1));
+        let block_char = "▀";
+        let sw1 = Span::styled(block_char.to_string(), Style::default().fg(rgb(theme::color(name, Role::Accent))));
+        let sw2 = Span::styled(block_char.to_string(), Style::default().fg(rgb(theme::color(name, Role::Accent2))));
+        let sw3 = Span::styled(block_char.to_string(), Style::default().fg(rgb(theme::color(name, Role::Text))));
+        let name_span = if i == cursor {
+            styled(theme, Role::Accent, format!(" {name}")).add_modifier(Modifier::BOLD)
+        } else {
+            styled(theme, Role::Text, format!(" {name}"))
+        };
+        let mut spans = vec![chevron, index, sw1, sw2, sw3, name_span];
+        if *name == app.theme {
+            spans.push(styled(theme, Role::Dim, "  "));
+            spans.push(styled(theme, Role::Accent, "✓"));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(styled(theme, Role::Dim, "Enter seleciona · Esc cancela")));
+    Paragraph::new(lines).render(inner, buf);
 }
 
 use ratatui::widgets::Widget;
@@ -501,5 +623,21 @@ mod tests {
         app.submit();
         assert!(app.chat.iter().any(|m| m.text.contains("faz algo")));
         assert!(app.chat.iter().any(|m| m.text.contains("streaming em breve")));
+    }
+
+    #[test]
+    fn theme_picker_opens_navigates_and_confirms() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.dispatch("/theme");
+        assert!(matches!(app.mode, Mode::ThemePicker { .. }));
+        app.picker_move(1);
+        let names = theme::names();
+        assert_eq!(app.active_theme(), names[1]);
+        // theme not committed until confirm
+        assert_eq!(app.theme, "hacker");
+        app.picker_cancel();
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.theme, "hacker");
     }
 }

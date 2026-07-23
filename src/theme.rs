@@ -15,17 +15,21 @@ pub struct Palette {
     pub prompt: &'static str,
 }
 
+/// Cursor-only accent: kept fully saturated even on the desaturated `hacker`
+/// palette, so the input caret still reads as "alive" against sober text.
+pub const NEON: (u8, u8, u8) = (0, 255, 102);
+
 const PALETTES: &[Palette] = &[
     Palette {
         name: "hacker",
-        accent: (0, 255, 65),
-        accent2: (0, 170, 60),
-        dim: (70, 120, 80),
-        text: (150, 255, 150),
-        ok: (0, 255, 65),
+        accent: (92, 232, 138),
+        accent2: (60, 160, 100),
+        dim: (90, 110, 95),
+        text: (205, 220, 208),
+        ok: (92, 232, 138),
         warn: (255, 200, 0),
-        fail: (255, 60, 60),
-        prompt: "root@regente:~# ",
+        fail: (255, 90, 90),
+        prompt: "❯ ",
     },
     Palette {
         name: "luxury",
@@ -36,7 +40,7 @@ const PALETTES: &[Palette] = &[
         ok: (200, 170, 80),
         warn: (220, 160, 60),
         fail: (200, 70, 70),
-        prompt: "❖ ",
+        prompt: "❯ ",
     },
     Palette {
         name: "cyberpunk",
@@ -47,7 +51,7 @@ const PALETTES: &[Palette] = &[
         ok: (57, 255, 20),
         warn: (249, 240, 2),
         fail: (255, 42, 109),
-        prompt: "▶ ",
+        prompt: "❯ ",
     },
     Palette {
         name: "synthwave",
@@ -58,7 +62,7 @@ const PALETTES: &[Palette] = &[
         ok: (114, 239, 221),
         warn: (255, 215, 120),
         fail: (255, 90, 140),
-        prompt: "➤ ",
+        prompt: "❯ ",
     },
     Palette {
         name: "dracula",
@@ -69,7 +73,7 @@ const PALETTES: &[Palette] = &[
         ok: (80, 250, 123),
         warn: (241, 250, 140),
         fail: (255, 85, 85),
-        prompt: "λ ",
+        prompt: "❯ ",
     },
     Palette {
         name: "forest",
@@ -103,6 +107,7 @@ pub enum Role {
     Ok,
     Warn,
     Fail,
+    Neon,
 }
 
 pub fn names() -> Vec<&'static str> {
@@ -127,6 +132,7 @@ pub fn color(name: &str, role: Role) -> (u8, u8, u8) {
         Role::Ok => p.ok,
         Role::Warn => p.warn,
         Role::Fail => p.fail,
+        Role::Neon => NEON,
     }
 }
 
