@@ -4,6 +4,9 @@
 //! turn into chat as a placeholder until the master driver lands.
 
 use crate::config::Config;
+use crate::driver;
+use crate::playbook;
+use crate::stream;
 use crate::theme::{self, Role};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -20,6 +23,7 @@ use ratatui::Terminal;
 use std::io::Stdout;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,6 +105,9 @@ struct App {
     theme: String,
     mode: Mode,
     master: String,
+    master_cli: String,
+    master_model: Option<String>,
+    playbook_prompt: String,
     repo: String,
     chat: Vec<ChatMsg>,
     input: String,
@@ -109,6 +116,8 @@ struct App {
     master_session: String,
     buddy: Option<crate::buddy::Buddy>,
     buddy_tick: usize,
+    session_id: Option<String>,
+    rx: Option<Receiver<stream::Event>>,
 }
 
 impl App {
@@ -122,6 +131,9 @@ impl App {
             theme,
             mode: Mode::Normal,
             master,
+            master_cli: config.master.cli.clone(),
+            master_model: config.master.model.clone(),
+            playbook_prompt: playbook::prompt(config),
             repo: repo.to_string(),
             chat: vec![ChatMsg {
                 role: ChatRole::Info,
@@ -133,6 +145,8 @@ impl App {
             master_session: "regente-master".into(),
             buddy: None,
             buddy_tick: 0,
+            session_id: None,
+            rx: None,
         }
     }
 
@@ -197,8 +211,65 @@ impl App {
             self.dispatch(&line);
             return;
         }
-        self.push(ChatRole::User, line);
-        self.push(ChatRole::Assistant, "(streaming em breve)");
+        self.push(ChatRole::User, line.clone());
+        self.spawn_turn(line);
+    }
+
+    /// Fires `driver::spawn_turn` on a background thread and stores the
+    /// receiver; the event loop drains it every tick via `drain_stream`.
+    fn spawn_turn(&mut self, task: String) {
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        let cli = self.master_cli.clone();
+        let model = self.master_model.clone();
+        let repo = self.repo.clone();
+        let playbook = self.playbook_prompt.clone();
+        let session_id = self.session_id.clone();
+        std::thread::spawn(move || {
+            driver::spawn_turn(&cli, model.as_deref(), &repo, Some(&playbook), &task, session_id, tx);
+        });
+    }
+
+    /// Drains any pending stream events without blocking, mapping each to a
+    /// chat line (or updating `session_id` on Ready / closing `rx` on Done).
+    fn drain_stream(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+        if let Some(rx) = &self.rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        for event in events {
+            self.handle_stream_event(event);
+        }
+        if disconnected {
+            self.rx = None;
+        }
+    }
+
+    fn handle_stream_event(&mut self, event: stream::Event) {
+        match event {
+            stream::Event::Ready { session_id } => self.session_id = Some(session_id),
+            stream::Event::Text(text) => self.push(ChatRole::Assistant, text),
+            stream::Event::Tool { name, .. } => self.push(ChatRole::Tool, name),
+            stream::Event::ToolResult(text) => self.push(ChatRole::Info, text),
+            stream::Event::Done { cost } => {
+                let line = match cost {
+                    Some(c) => format!("— ${c:.4}"),
+                    None => "— concluído".to_string(),
+                };
+                self.push(ChatRole::Info, line);
+                self.rx = None;
+            }
+        }
     }
 
     fn dispatch(&mut self, line: &str) {
@@ -396,6 +467,7 @@ pub fn run(config: &Config, repo: &str) -> Result<()> {
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     let mut last_poll = Instant::now();
     loop {
+        app.drain_stream();
         terminal.draw(|f| draw(f.area(), f.buffer_mut(), app))?;
 
         if last_poll.elapsed() >= Duration::from_secs(1) {
@@ -746,13 +818,40 @@ mod tests {
     }
 
     #[test]
-    fn app_submit_echoes_user_and_placeholder() {
+    fn app_submit_echoes_user_and_spawns_turn() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
         app.input = "faz algo".into();
         app.submit();
         assert!(app.chat.iter().any(|m| m.text.contains("faz algo")));
-        assert!(app.chat.iter().any(|m| m.text.contains("streaming em breve")));
+        assert!(app.rx.is_some());
+    }
+
+    #[test]
+    fn handle_stream_event_ready_sets_session_id() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.handle_stream_event(stream::Event::Ready { session_id: "sess-1".into() });
+        assert_eq!(app.session_id.as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn handle_stream_event_text_pushes_assistant_line() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.handle_stream_event(stream::Event::Text("oi".into()));
+        assert!(app.chat.iter().any(|m| matches!(m.role, ChatRole::Assistant) && m.text == "oi"));
+    }
+
+    #[test]
+    fn handle_stream_event_done_closes_rx_and_shows_cost() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        let (_tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        app.handle_stream_event(stream::Event::Done { cost: Some(0.01) });
+        assert!(app.rx.is_none());
+        assert!(app.chat.iter().any(|m| m.text.contains("0.0100")));
     }
 
     #[test]
