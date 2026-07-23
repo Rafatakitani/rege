@@ -30,6 +30,13 @@ module Regente
           { type: "object", properties: { agent_id: { type: "string" } }, required: %w[agent_id] },
           :agent_status
         ],
+        "wait_agent" => [
+          "Bloqueia ate o agente terminar (ou timeout em s) e commita o trabalho. Use apos spawn_agent.",
+          { type: "object",
+            properties: { agent_id: { type: "string" }, timeout: { type: "integer" } },
+            required: %w[agent_id] },
+          :wait_agent
+        ],
         "read_output" => [
           "Saida acumulada de um agente.",
           { type: "object", properties: { agent_id: { type: "string" } }, required: %w[agent_id] },

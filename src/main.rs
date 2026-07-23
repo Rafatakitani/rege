@@ -4,6 +4,7 @@
 mod command;
 mod config;
 mod playbook;
+mod worktree;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

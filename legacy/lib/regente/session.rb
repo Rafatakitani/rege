@@ -37,6 +37,16 @@ module Regente
       end
     end
 
+    # Block until the agent finishes (or timeout), then commit its work.
+    # Lets a one-shot master orchestrate without a polling loop.
+    def wait_agent(agent_id:, timeout: 300)
+      with_agent(agent_id) do |a|
+        state = a.wait(timeout: timeout)
+        a.commit if state == :done
+        { agent_id: agent_id, state: state }
+      end
+    end
+
     def read_output(agent_id:)
       with_agent(agent_id) { |a| { agent_id: agent_id, output: a.output } }
     end
