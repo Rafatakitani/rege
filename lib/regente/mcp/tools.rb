@@ -64,6 +64,13 @@ module Regente
           { type: "object", properties: { agent_id: { type: "string" } }, required: %w[agent_id] },
           :run_tests
         ],
+        "consult" => [
+          "Pergunta pontual a um modelo mais forte (ex: opus) sem spawnar worker. Escalacao de raciocinio.",
+          { type: "object",
+            properties: { question: { type: "string" }, model: { type: "string" } },
+            required: %w[question] },
+          :consult
+        ],
         "open_pr" => [
           "Abre um PR a partir de uma branch (nunca faz merge). Fallback: patch local.",
           { type: "object",

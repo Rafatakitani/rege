@@ -74,6 +74,14 @@ module Regente
       end
     end
 
+    # Ask a stronger model a one-shot question (escalation without spawning a
+    # full worker). Used when the sonnet master hits a decision beyond it.
+    def consult(question:, model: "opus", cli: "claude")
+      cmd = Command.string(cli: cli, task: question, model: model, yolo: false)
+      out, _e, status = Open3.capture3(*cmd.shellsplit, chdir: @repo)
+      { model: model, answer: out.strip, ok: status.success? }
+    end
+
     def open_pr(branch:, title:, body:)
       result = @pr.open(branch: branch, title: title, body: body)
       { mode: result.mode, ref: result.ref }

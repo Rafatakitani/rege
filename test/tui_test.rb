@@ -19,7 +19,7 @@ class TUITest < Minitest::Test
     with_temp_repo do |repo|
       box = tui(repo).header_box
       assert_includes box, "claude"
-      assert_includes box, "opus"
+      assert_includes box, "sonnet"
       assert_includes box, File.basename(repo)
     end
   end

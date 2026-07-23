@@ -12,7 +12,9 @@ module Regente
   class Config
     DEFAULTS = {
       # The conversational master the user talks to. Swappable.
-      "master" => { "cli" => "claude", "model" => "opus" },
+      # Default sonnet (cheap/fast for orchestration); escalates heavy reasoning
+      # to opus via the planner/reviewer roles and the `consult` tool.
+      "master" => { "cli" => "claude", "model" => "sonnet" },
 
       # role -> cli -> model mapping. Fully editable.
       "roster" => [

@@ -30,6 +30,15 @@ class MCPToolsTest < Minitest::Test
   def test_unknown_tool_raises
     assert_raises(Regente::Error) { Regente::MCP::Tools.call("nope", {}, nil) }
   end
+
+  def test_consult_dispatches_with_model
+    fake = Object.new
+    def fake.consult(question:, model: "opus") = { model: model, answer: "use X" }
+    result = Regente::MCP::Tools.call("consult",
+                                      { "question" => "e ai?", "model" => "opus" }, fake)
+    assert_equal "opus", result[:model]
+    assert_equal "use X", result[:answer]
+  end
 end
 
 class MCPServerTest < Minitest::Test
