@@ -1,4 +1,4 @@
-//! regente — orquestrador multi-agente de IAs (Rust).
+//! rege — orquestrador multi-agente de IAs (Rust).
 #![allow(dead_code)] // WIP: modules land incrementally
 
 mod agent;
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser)]
-#[command(name = "regente", version, about = "Orquestrador multi-agente de IAs")]
+#[command(name = "rege", version, about = "Orquestrador multi-agente de IAs")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -48,7 +48,7 @@ enum Cmd {
         #[arg(long)]
         repo: PathBuf,
     },
-    /// Abre o claude INTERATIVO ja como orquestrador Regente (playbook + MCP + yolo).
+    /// Abre o claude INTERATIVO ja como orquestrador Rege (playbook + MCP + yolo).
     Claude,
     /// Renderiza um frame da TUI como texto (headless, sem tty) pra inspeção/debug.
     Render {
@@ -95,7 +95,7 @@ fn main() -> Result<()> {
 /// Headless run: seed the master with the playbook + task, stream to stdout.
 fn exec(cfg: &Config, task: &str) -> Result<()> {
     if task.trim().is_empty() {
-        eprintln!("uso: regente exec \"<tarefa>\"");
+        eprintln!("uso: rege exec \"<tarefa>\"");
         std::process::exit(2);
     }
     // exec = headless ORCHESTRATOR (like `codex exec`, but the master commands
@@ -105,9 +105,9 @@ fn exec(cfg: &Config, task: &str) -> Result<()> {
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| "regente".into());
+        .unwrap_or_else(|| "rege".into());
     let mcp = serde_json::json!({
-        "mcpServers": { "regente": {
+        "mcpServers": { "rege": {
             "command": exe,
             "args": ["mcp-serve", "--repo", repo.to_string_lossy()]
         }}
@@ -133,21 +133,21 @@ fn exec(cfg: &Config, task: &str) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Launch claude INTERACTIVE, pre-wired as the Regente orchestrator: playbook
+/// Launch claude INTERACTIVE, pre-wired as the Rege orchestrator: playbook
 /// system prompt + MCP server + yolo. Same as `exec` but interactive (no -p),
-/// so you chat with the master directly (`regente claude` ~ `claude --regente`).
+/// so you chat with the master directly (`rege claude` ~ `claude --rege`).
 fn claude_orchestrator(cfg: &Config) -> Result<()> {
     if cfg.master.cli != "claude" {
-        eprintln!("`regente claude` so suporta master=claude (atual: {})", cfg.master.cli);
+        eprintln!("`rege claude` so suporta master=claude (atual: {})", cfg.master.cli);
         std::process::exit(2);
     }
     let repo = std::env::current_dir()?;
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| "regente".into());
+        .unwrap_or_else(|| "rege".into());
     let mcp = serde_json::json!({
-        "mcpServers": { "regente": {
+        "mcpServers": { "rege": {
             "command": exe,
             "args": ["mcp-serve", "--repo", repo.to_string_lossy()]
         }}

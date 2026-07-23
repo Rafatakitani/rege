@@ -1,5 +1,5 @@
-//! Layered configuration: defaults <- global (~/.config/regente/config.yml)
-//! <- project (.regente.yml). Later layers deep-merge over earlier ones.
+//! Layered configuration: defaults <- global (~/.config/rege/config.yml)
+//! <- project (.rege.yml). Later layers deep-merge over earlier ones.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ impl Default for Config {
             ],
             timeouts: map(&[("triage", 60), ("worker", 300), ("reviewer", 300), ("healthcheck", 15)]),
             playbooks: map(&[("review_rounds", 3), ("retry_on_timeout", 1)]),
-            pr: smap(&[("provider", "github"), ("branch_prefix", "regente")]),
+            pr: smap(&[("provider", "github"), ("branch_prefix", "rege")]),
             sandbox: bmap(&[("enabled", true), ("yolo", true)]),
             ui: smap(&[("theme", "hacker")]),
             verify: BTreeMap::new(),
@@ -81,7 +81,7 @@ impl Config {
     }
 
     pub fn global_path(home: &Path) -> PathBuf {
-        home.join(".config/regente/config.yml")
+        home.join(".config/rege/config.yml")
     }
 
     /// defaults <- global <- project
@@ -91,7 +91,7 @@ impl Config {
             deep_merge(&mut merged, v);
         }
         if let Some(dir) = project_dir {
-            if let Some(v) = read_yaml(&dir.join(".regente.yml"))? {
+            if let Some(v) = read_yaml(&dir.join(".rege.yml"))? {
                 deep_merge(&mut merged, v);
             }
         }
@@ -147,9 +147,9 @@ mod tests {
     use std::fs;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("regente-cfg-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("rege-cfg-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(d.join("home/.config/regente")).unwrap();
+        fs::create_dir_all(d.join("home/.config/rege")).unwrap();
         fs::create_dir_all(d.join("proj")).unwrap();
         d
     }
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn global_overrides_defaults() {
         let d = tmp("global");
-        fs::write(d.join("home/.config/regente/config.yml"), "master:\n  cli: gemini\n  model: pro\n").unwrap();
+        fs::write(d.join("home/.config/rege/config.yml"), "master:\n  cli: gemini\n  model: pro\n").unwrap();
         let c = Config::load(Some(&d.join("proj")), &d.join("home")).unwrap();
         assert_eq!(c.master.cli, "gemini");
         assert_eq!(c.master.model.as_deref(), Some("pro"));
@@ -178,8 +178,8 @@ mod tests {
     #[test]
     fn project_overrides_global() {
         let d = tmp("project");
-        fs::write(d.join("home/.config/regente/config.yml"), "master:\n  cli: gemini\n").unwrap();
-        fs::write(d.join("proj/.regente.yml"), "master:\n  cli: codex\n").unwrap();
+        fs::write(d.join("home/.config/rege/config.yml"), "master:\n  cli: gemini\n").unwrap();
+        fs::write(d.join("proj/.rege.yml"), "master:\n  cli: codex\n").unwrap();
         let c = Config::load(Some(&d.join("proj")), &d.join("home")).unwrap();
         assert_eq!(c.master.cli, "codex");
     }
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn deep_merge_preserves_siblings() {
         let d = tmp("deepmerge");
-        fs::write(d.join("proj/.regente.yml"), "timeouts:\n  worker: 999\n").unwrap();
+        fs::write(d.join("proj/.rege.yml"), "timeouts:\n  worker: 999\n").unwrap();
         let c = Config::load(Some(&d.join("proj")), &d.join("home")).unwrap();
         assert_eq!(*c.timeouts.get("worker").unwrap(), 999);
         assert_eq!(*c.timeouts.get("triage").unwrap(), 60);

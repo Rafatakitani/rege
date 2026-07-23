@@ -1,7 +1,7 @@
 //! The stateful context the master operates on through MCP tools. Wraps the
 //! Engine and tracks agents by id. All methods return `serde_json::Value`
 //! (JSON-friendly) so the MCP layer can serialize them directly. Porta
-//! `legacy/lib/regente/session.rb` + `legacy/lib/regente/pr.rb`.
+//! `legacy/lib/rege/session.rb` + `legacy/lib/rege/pr.rb`.
 
 use crate::agent::{Agent, State};
 use crate::command;
@@ -233,7 +233,7 @@ fn write_patch(repo: &Path, branch: &str) -> Result<PathBuf> {
     if !out.status.success() {
         anyhow::bail!("git diff falhou: {}", String::from_utf8_lossy(&out.stderr));
     }
-    let dir = repo.join(".regente-runs");
+    let dir = repo.join(".rege-runs");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.patch", branch.replace('/', "-")));
     std::fs::write(&path, out.stdout)?;
@@ -246,7 +246,7 @@ mod tests {
     use std::fs;
 
     fn init_repo(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("regente-session-test-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("rege-session-test-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         run(&d, &["init", "-q"]);
@@ -358,12 +358,12 @@ mod tests {
         let config = Config::default();
         let session = Session::new(&repo, &config);
         let base = default_branch(&repo).unwrap();
-        run(&repo, &["checkout", "-b", "regente/x"]);
+        run(&repo, &["checkout", "-b", "rege/x"]);
         fs::write(repo.join("out.txt"), "hi\n").unwrap();
         run(&repo, &["add", "-A"]);
         run(&repo, &["commit", "-q", "-m", "work"]);
         run(&repo, &["checkout", &base]);
-        let result = session.open_pr("regente/x", "titulo", "corpo").unwrap();
+        let result = session.open_pr("rege/x", "titulo", "corpo").unwrap();
         assert_eq!(result["mode"], json!("patch"));
         let path = PathBuf::from(result["ref"].as_str().unwrap());
         assert!(path.exists());

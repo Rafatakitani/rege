@@ -1,7 +1,7 @@
 //! Drives the master model headless in streaming mode on a background
 //! thread, translating `stream-json` lines into `stream::Event`s sent over
 //! an mpsc channel so the TUI can render the conversation as it arrives.
-//! Porta `legacy/lib/regente/master_driver.rb`. Multi-turn is done by
+//! Porta `legacy/lib/rege/master_driver.rb`. Multi-turn is done by
 //! re-spawning the process with `--resume <session_id>` (no long-lived
 //! stdin protocol).
 
@@ -70,9 +70,9 @@ fn build_argv(
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| "regente".into());
+        .unwrap_or_else(|| "rege".into());
     let mcp = serde_json::json!({
-        "mcpServers": { "regente": {
+        "mcpServers": { "rege": {
             "command": exe,
             "args": ["mcp-serve", "--repo", repo]
         }}

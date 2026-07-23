@@ -20,7 +20,7 @@ impl Tmux {
     pub fn new(session: &str, logdir: Option<&Path>) -> Result<Tmux> {
         let logdir = match logdir {
             Some(d) => d.to_path_buf(),
-            None => std::env::temp_dir().join("regente-logs"),
+            None => std::env::temp_dir().join("rege-logs"),
         };
         std::fs::create_dir_all(&logdir)?;
         let logfile = logdir.join(format!("{}.log", session));
@@ -202,7 +202,7 @@ mod tests {
     }
 
     fn tmp_logdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("regente-tmux-test-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("rege-tmux-test-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

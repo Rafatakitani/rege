@@ -4,7 +4,7 @@
 //! fixos para o mesmo seed. Algoritmo de geracao (rarity roll, stat floor/peak/
 //! dump) segue `server/engine.ts` do repo original; o hash usa `DefaultHasher`
 //! (a wyhash original e especifica de runtime JS/Bun e nao precisa ser
-//! bit-exata — so precisamos de determinismo estavel dentro do Regente).
+//! bit-exata — so precisamos de determinismo estavel dentro do Rege).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn stats_stay_in_bounds() {
-        for seed in ["a", "b", "c", "regente", "zzz", "1234"] {
+        for seed in ["a", "b", "c", "rege", "zzz", "1234"] {
             let buddy = Buddy::hatch(seed);
             for v in [buddy.debugging, buddy.patience, buddy.chaos, buddy.wisdom, buddy.snark] {
                 assert!(v >= 1);
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn pet_changes_reaction_and_stats() {
-        let mut buddy = Buddy::hatch("regente");
+        let mut buddy = Buddy::hatch("rege");
         let before = buddy.patience;
         let reaction = buddy.pet();
         assert!(!reaction.is_empty());
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn pet_cycles_through_reactions() {
-        let mut buddy = Buddy::hatch("regente");
+        let mut buddy = Buddy::hatch("rege");
         let mut seen = std::collections::HashSet::new();
         for _ in 0..PET_REACTIONS.len() {
             seen.insert(buddy.pet());
@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn frame_follows_status_sequence() {
-        let buddy = Buddy::hatch("regente");
+        let buddy = Buddy::hatch("rege");
         assert_eq!(buddy.frame(0), &buddy.frames[0]);
         assert_eq!(buddy.frame(4), &buddy.frames[1]);
         assert_eq!(buddy.frame(8), &buddy.frames[3]);
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn render_lines_has_art_header_and_five_stats() {
-        let buddy = Buddy::hatch("regente");
+        let buddy = Buddy::hatch("rege");
         let lines = buddy.render_lines(0);
         assert!(lines.iter().any(|l| l.contains(buddy.rarity.label())));
         assert!(lines.iter().any(|l| l.contains("DEB")));

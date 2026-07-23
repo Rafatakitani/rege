@@ -48,7 +48,7 @@ impl Agent {
             .unwrap_or(true);
         let prefix = config.and_then(|c| c.pr.get("branch_prefix").map(String::as_str));
         let worktree = Worktree::new(repo, name, prefix, base, None)?;
-        let tmux = Tmux::new(&format!("regente-{name}"), None)?;
+        let tmux = Tmux::new(&format!("rege-{name}"), None)?;
         Ok(Agent {
             name: name.to_string(),
             cli: cli.to_string(),
@@ -127,7 +127,7 @@ impl Agent {
     pub fn commit(&self, message: Option<&str>) {
         let msg = message
             .map(str::to_string)
-            .unwrap_or_else(|| format!("regente: {}", self.name));
+            .unwrap_or_else(|| format!("rege: {}", self.name));
         let _ = self.worktree.commit_all(&msg);
     }
 
@@ -142,7 +142,7 @@ impl Agent {
     /// Swap in a fresh tmux session and restart the same command (used on retry).
     pub fn restart(&mut self) -> Result<()> {
         let cmd = self.build_command()?;
-        let tmux = Tmux::new(&format!("regente-{}-retry", self.name), None)?;
+        let tmux = Tmux::new(&format!("rege-{}-retry", self.name), None)?;
         tmux.start(&cmd, &self.worktree.path)?;
         self.tmux = tmux;
         self.state = State::Running;
@@ -179,7 +179,7 @@ mod tests {
     use std::process::Command;
 
     fn init_repo(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("regente-agent-test-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("rege-agent-test-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         run(&d, &["init", "-q"]);
@@ -221,7 +221,7 @@ mod tests {
         let agent = Agent::new(&repo, "a1", "claude", "faz X", None, None, None, None, None).unwrap();
         assert_eq!(agent.state(), State::Pending);
         assert_eq!(agent.role, "worker");
-        assert_eq!(agent.worktree.branch, "regente/a1");
+        assert_eq!(agent.worktree.branch, "rege/a1");
     }
 
     #[test]

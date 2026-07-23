@@ -464,7 +464,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "regente"
+name = "rege"
 version = "0.1.0"
 dependencies = [
  "anyhow",

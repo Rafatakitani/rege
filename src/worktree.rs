@@ -22,7 +22,7 @@ impl Worktree {
         root: Option<&Path>,
     ) -> Result<Self> {
         let repo = std::fs::canonicalize(repo)?;
-        let branch_prefix = branch_prefix.unwrap_or("regente");
+        let branch_prefix = branch_prefix.unwrap_or("rege");
         let branch = format!("{}/{}", branch_prefix, name);
         let root = match root {
             Some(r) => r.to_path_buf(),
@@ -30,7 +30,7 @@ impl Worktree {
                 let repo_name = repo
                     .file_name()
                     .ok_or_else(|| anyhow!("repo sem nome de diretorio"))?;
-                std::env::temp_dir().join("regente-worktrees").join(repo_name)
+                std::env::temp_dir().join("rege-worktrees").join(repo_name)
             }
         };
         let path = root.join(name);
@@ -154,7 +154,7 @@ mod tests {
     use std::fs;
 
     fn init_repo(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("regente-wt-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("rege-wt-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         run(&d, &["init", "-q"]);
@@ -177,7 +177,7 @@ mod tests {
         let wt = Worktree::new(&repo, "agent1", None, None, None).unwrap();
         let path = wt.create().unwrap();
         assert!(path.is_dir());
-        assert_eq!(wt.branch, "regente/agent1");
+        assert_eq!(wt.branch, "rege/agent1");
         assert!(wt.exists());
         wt.remove(true).unwrap();
     }
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn custom_branch_prefix_and_root() {
         let repo = init_repo("custom");
-        let root = std::env::temp_dir().join(format!("regente-wt-custom-root-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rege-wt-custom-root-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let wt = Worktree::new(&repo, "agent5", Some("feat"), None, Some(&root)).unwrap();
         wt.create().unwrap();

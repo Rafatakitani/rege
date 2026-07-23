@@ -1,6 +1,6 @@
 //! Persisted history of master-driver sessions, so `/resume` can offer past
 //! conversations to continue via `--resume <session_id>` (see `driver.rs`).
-//! Stored as a flat JSON array at `~/.local/share/regente/sessions.json`.
+//! Stored as a flat JSON array at `~/.local/share/rege/sessions.json`.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ fn data_home() -> PathBuf {
 }
 
 pub fn default_path() -> PathBuf {
-    data_home().join(".local/share/regente/sessions.json")
+    data_home().join(".local/share/rege/sessions.json")
 }
 
 pub fn load(path: &Path) -> Vec<SessionRec> {
@@ -57,7 +57,7 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("regente-sessions-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("rege-sessions-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&d);
         d.join("sessions.json")
     }

@@ -1,5 +1,5 @@
 //! Parser for Claude's `--output-format stream-json` events, ported from
-//! `legacy/lib/regente/stream.rb`. Translates one parsed JSON line into zero
+//! `legacy/lib/rege/stream.rb`. Translates one parsed JSON line into zero
 //! or more small, UI-friendly Events for the TUI chat to render.
 
 use serde_json::Value;

@@ -1,5 +1,5 @@
 //! Full-screen ratatui app: fixed layout (header line, scrolling chat, pinned
-//! AGENTES dashboard, input line, status line). Porta `legacy/lib/regente/tui.rb` +
+//! AGENTES dashboard, input line, status line). Porta `legacy/lib/rege/tui.rb` +
 //! `screen.rb` + `dashboard.rb`. No streaming yet — Enter just echoes the
 //! turn into chat as a placeholder until the master driver lands.
 
@@ -151,12 +151,12 @@ impl App {
             repo: repo.to_string(),
             chat: vec![ChatMsg {
                 role: ChatRole::Info,
-                text: "Regente pronto. Digite uma tarefa. /help lista comandos, /quit sai.".into(),
+                text: "Rege pronto. Digite uma tarefa. /help lista comandos, /quit sai.".into(),
             }],
             input: String::new(),
             agents: Vec::new(),
-            logdir: std::env::temp_dir().join("regente-logs"),
-            master_session: "regente-master".into(),
+            logdir: std::env::temp_dir().join("rege-logs"),
+            master_session: "rege-master".into(),
             buddy: None,
             buddy_tick: 0,
             session_id: None,
@@ -410,7 +410,7 @@ impl App {
                 self.push(ChatRole::Info, format!("  auto_copy    {auto}"));
                 self.push(ChatRole::Info, format!("  repo         {repo}"));
                 self.push(ChatRole::Info, format!("  sessões      {sess}"));
-                self.push(ChatRole::Info, "edite ~/.config/regente/config.yml ou .regente.yml no projeto");
+                self.push(ChatRole::Info, "edite ~/.config/rege/config.yml ou .rege.yml no projeto");
             }
             "/theme" => match parts.next() {
                 None => self.open_theme_picker(),
@@ -533,7 +533,7 @@ fn rel_time(ts: u64, now: u64) -> String {
     }
 }
 
-/// Seed for hatching the buddy: `$USER`, else `$HOSTNAME`/`hostname(1)`, else "regente".
+/// Seed for hatching the buddy: `$USER`, else `$HOSTNAME`/`hostname(1)`, else "rege".
 fn buddy_seed() -> String {
     if let Ok(user) = std::env::var("USER") {
         if !user.is_empty() {
@@ -553,14 +553,14 @@ fn buddy_seed() -> String {
             }
         }
     }
-    "regente".to_string()
+    "rege".to_string()
 }
 
 fn list_agents(logdir: &PathBuf, master_session: &str) -> Vec<AgentRow> {
     let sessions = tmux_sessions();
     sessions
         .into_iter()
-        .filter(|s| s.starts_with("regente-") && s != master_session)
+        .filter(|s| s.starts_with("rege-") && s != master_session)
         .map(|s| agent_row(&s, logdir))
         .collect()
 }
@@ -578,7 +578,7 @@ fn tmux_sessions() -> Vec<String> {
 }
 
 fn agent_row(session: &str, logdir: &PathBuf) -> AgentRow {
-    let name = session.strip_prefix("regente-").unwrap_or(session).to_string();
+    let name = session.strip_prefix("rege-").unwrap_or(session).to_string();
     let log = std::fs::read_to_string(logdir.join(format!("{session}.log"))).unwrap_or_default();
     let state = if let Some(code) = find_exit_code(&log) {
         if code == 0 {
@@ -659,7 +659,7 @@ fn save_theme_to_config(theme: &str) -> Result<()> {
 }
 
 /// Headless render: draw one frame to an off-screen buffer and return it as
-/// plain text (one line per row). No tty needed — used by `regente render` and
+/// plain text (one line per row). No tty needed — used by `rege render` and
 /// tests so the TUI can be inspected without a real terminal. `demo` seeds a
 /// bit of chat/agent state so the layout is exercised.
 pub fn render_frame(config: &Config, repo: &str, cols: u16, rows: u16, demo: bool) -> String {
@@ -883,18 +883,18 @@ fn highlight_selection(area: Rect, buf: &mut ratatui::buffer::Buffer, start: (u1
 
 fn draw_header(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     let suffix = format!(" · {} · ~/{} · {}", app.master, repo_name(app), theme);
-    let line = Line::from(vec![styled(theme, Role::Accent, "regente"), styled(theme, Role::Dim, suffix)]);
+    let line = Line::from(vec![styled(theme, Role::Accent, "rege"), styled(theme, Role::Dim, suffix)]);
     Paragraph::new(line).render(area, buf);
 }
 
-/// REGENTE wordmark, block letters, shown atop the chat only before the
+/// REGE wordmark, block letters, shown atop the chat only before the
 /// first user message — sober, no glow, just the desaturated dim tone.
 const BANNER: [&str; 5] = [
-    "████  █████ ████  █████ ██  ██ █████ █████",
-    "██ ██ ██    ██    ██    ███ ██   █   ██   ",
-    "████  ████  ██ ██ ████  ██████   █   ████ ",
-    "██ ██ ██    ██ ██ ██    ██ ███   █   ██   ",
-    "██ ██ █████ ████  █████ ██  ██   █   █████",
+    "████  █████ ████  █████",
+    "██ ██ ██    ██    ██   ",
+    "████  ████  ██ ██ ████ ",
+    "██ ██ ██    ██ ██ ██   ",
+    "██ ██ █████ ████  █████",
 ];
 
 fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
@@ -1234,7 +1234,7 @@ mod tests {
     fn render_frame_headless_shows_wordmark_and_header() {
         let config = Config::default();
         let out = render_frame(&config, "/tmp/portfolio", 100, 32, false);
-        assert!(out.contains("regente")); // header
+        assert!(out.contains("rege")); // header
         assert!(out.contains("/help")); // welcome/status hint
     }
 

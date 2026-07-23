@@ -1,6 +1,6 @@
 //! Tool catalog exposed to the master over MCP, plus a JSON-RPC 2.0
 //! newline-delimited server over stdio. Porta
-//! `legacy/lib/regente/mcp/tools.rb` + `legacy/lib/regente/mcp/server.rb`.
+//! `legacy/lib/rege/mcp/tools.rb` + `legacy/lib/rege/mcp/server.rb`.
 
 use crate::session::Session;
 use anyhow::{bail, Result};
@@ -272,7 +272,7 @@ fn initialize_result() -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "regente", "version": env!("CARGO_PKG_VERSION") }
+        "serverInfo": { "name": "rege", "version": env!("CARGO_PKG_VERSION") }
     })
 }
 
@@ -293,7 +293,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn init_repo(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("regente-mcp-test-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("rege-mcp-test-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         run(&d, &["init", "-q"]);
@@ -362,7 +362,7 @@ mod tests {
         let config = Config::default();
         let session = Session::new(&repo, &config);
         let replies = roundtrip(&[json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })], session);
-        assert_eq!(replies[0]["result"]["serverInfo"]["name"], json!("regente"));
+        assert_eq!(replies[0]["result"]["serverInfo"]["name"], json!("rege"));
         assert!(replies[0]["result"]["capabilities"]["tools"].is_object());
     }
 

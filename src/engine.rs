@@ -181,7 +181,7 @@ mod tests {
     use std::sync::Arc;
 
     fn init_repo(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("regente-engine-test-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("rege-engine-test-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         run(&d, &["init", "-q"]);

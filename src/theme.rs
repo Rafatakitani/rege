@@ -1,5 +1,5 @@
 //! Named color themes (RGB truecolor) + prompt strings. Porta
-//! `legacy/lib/regente/theme.rb`. Selected via config `ui.theme`.
+//! `legacy/lib/rege/theme.rb`. Selected via config `ui.theme`.
 
 pub const DEFAULT: &str = "hacker";
 

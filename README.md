@@ -1,4 +1,4 @@
-# Regente
+# Rege
 
 > ⚠️ Nome provisório · projeto em desenvolvimento.
 
@@ -10,7 +10,7 @@ num `git worktree` + sessão `tmux`**, revisa o resultado e **abre um PR** — n
 merge sozinho.
 
 ```
-você ⇄ TUI do mestre  →  mestre (claude/…) via MCP  →  Regente
+você ⇄ TUI do mestre  →  mestre (claude/…) via MCP  →  Rege
                                                           │
                         ┌──────────────┬─────────────┬────┘
                   worker (worktree A)  (worktree B)  (worktree C)  → review → PR
@@ -38,20 +38,20 @@ que você controla e entende o que está sendo pedido.** Não é uma sandbox de 
 ## Instalação
 
 ```bash
-git clone <este-repo> regente && cd regente
+git clone <este-repo> rege && cd rege
 cargo install --path .
 ```
 
 ## Uso
 
 ```bash
-regente                       # abre a TUI (orquestrador com chat, agentes, temas)
-regente exec "corrige o bug de login"   # headless (tipo `codex exec`), orquestra e imprime
-regente claude                # abre o claude interativo já em modo Regente (playbook+MCP)
-regente doctor                # health check do roster de CLIs + mestre atual
-regente config                # imprime a config efetiva
-regente mcp-serve --repo .    # servidor MCP puro (JSON-RPC stdio) pro repo
-regente render --demo         # desenha um frame da TUI como texto (headless, sem tty)
+rege                       # abre a TUI (orquestrador com chat, agentes, temas)
+rege exec "corrige o bug de login"   # headless (tipo `codex exec`), orquestra e imprime
+rege claude                # abre o claude interativo já em modo Rege (playbook+MCP)
+rege doctor                # health check do roster de CLIs + mestre atual
+rege config                # imprime a config efetiva
+rege mcp-serve --repo .    # servidor MCP puro (JSON-RPC stdio) pro repo
+rege render --demo         # desenha um frame da TUI como texto (headless, sem tty)
 ```
 
 ### Comandos da TUI
@@ -66,12 +66,12 @@ Tailscale, p.ex.) + `tmux attach`. Sem app.
 
 ## Configuração
 
-Camadas, deep-merge nesta ordem: defaults ← `~/.config/regente/config.yml` (global) ←
-`.regente.yml` (por projeto). Ajustável: mestre (`master.cli` / `master.model`), roster
+Camadas, deep-merge nesta ordem: defaults ← `~/.config/rege/config.yml` (global) ←
+`.rege.yml` (por projeto). Ajustável: mestre (`master.cli` / `master.model`), roster
 (papel→CLI→modelo), tema, `ui.auto_copy`, e mais.
 
 ```yaml
-# ~/.config/regente/config.yml
+# ~/.config/rege/config.yml
 master:
   cli: claude
   model: sonnet   # escala pra opus nos passos difíceis (planner/reviewer/consult)
@@ -93,10 +93,10 @@ cargo test    # 104 testes
 cargo fmt && cargo clippy
 ```
 
-A maior parte da versão Rust foi construída pelo próprio Regente (dogfooding): workers
+A maior parte da versão Rust foi construída pelo próprio Rege (dogfooding): workers
 em worktrees separados escreveram os módulos de backend. A implementação Ruby original
 está preservada na branch `legacy-ruby`. Desenho completo em
-`docs/superpowers/specs/2026-07-23-regente-design.md`.
+`docs/superpowers/specs/2026-07-23-rege-design.md`.
 
 ## Créditos & licença
 
