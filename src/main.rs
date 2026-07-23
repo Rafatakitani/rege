@@ -47,6 +47,8 @@ enum Cmd {
         #[arg(long)]
         repo: PathBuf,
     },
+    /// Abre o claude INTERATIVO ja como orquestrador Regente (playbook + MCP + yolo).
+    Claude,
 }
 
 fn main() -> Result<()> {
@@ -64,6 +66,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
+        Some(Cmd::Claude) => claude_orchestrator(&cfg),
         None => {
             let repo = cwd.to_string_lossy().to_string();
             tui::run(&cfg, &repo)
@@ -100,6 +103,41 @@ fn exec(cfg: &Config, task: &str) -> Result<()> {
     }
     let mut a: Vec<String> = vec![
         "claude".into(), "-p".into(), seed,
+        "--mcp-config".into(), mcp,
+        "--dangerously-skip-permissions".into(),
+    ];
+    if let Some(m) = &cfg.master.model {
+        a.push("--model".into());
+        a.push(m.clone());
+    }
+    let bin = a.remove(0);
+    let status = Command::new(bin).args(&a).status()?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Launch claude INTERACTIVE, pre-wired as the Regente orchestrator: playbook
+/// system prompt + MCP server + yolo. Same as `exec` but interactive (no -p),
+/// so you chat with the master directly (`regente claude` ~ `claude --regente`).
+fn claude_orchestrator(cfg: &Config) -> Result<()> {
+    if cfg.master.cli != "claude" {
+        eprintln!("`regente claude` so suporta master=claude (atual: {})", cfg.master.cli);
+        std::process::exit(2);
+    }
+    let repo = std::env::current_dir()?;
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "regente".into());
+    let mcp = serde_json::json!({
+        "mcpServers": { "regente": {
+            "command": exe,
+            "args": ["mcp-serve", "--repo", repo.to_string_lossy()]
+        }}
+    })
+    .to_string();
+    let mut a: Vec<String> = vec![
+        "claude".into(),
+        "--append-system-prompt".into(), playbook::prompt(cfg),
         "--mcp-config".into(), mcp,
         "--dangerously-skip-permissions".into(),
     ];
