@@ -4,6 +4,7 @@
 mod command;
 mod config;
 mod playbook;
+mod tmux;
 mod worktree;
 
 use anyhow::Result;
