@@ -17,6 +17,7 @@ serde_yaml = "0.9"
 anyhow = "1"
 ratatui = "0.28"
 crossterm = "0.28"
+base64 = "0.22"
 
 [profile.release]
 opt-level = 2

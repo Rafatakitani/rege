@@ -10,7 +10,10 @@ use crate::sessions::{self, SessionRec};
 use crate::stream;
 use crate::theme::{self, Role};
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -124,6 +127,11 @@ struct App {
     session_recorded: bool,
     pending_title: Option<String>,
     resume_list: Vec<SessionRec>,
+    auto_copy: bool,
+    row_text: Vec<String>,
+    selection_start: Option<(u16, u16)>,
+    selection_end: Option<(u16, u16)>,
+    flash: Option<(String, Instant)>,
 }
 
 impl App {
@@ -157,6 +165,11 @@ impl App {
             session_recorded: false,
             pending_title: None,
             resume_list: Vec::new(),
+            auto_copy: config.ui.get("auto_copy").map(|v| v != "false").unwrap_or(true),
+            row_text: Vec::new(),
+            selection_start: None,
+            selection_end: None,
+            flash: None,
         }
     }
 
@@ -239,6 +252,37 @@ impl App {
 
     fn resume_picker_cancel(&mut self) {
         self.mode = Mode::Normal;
+    }
+
+    fn mouse_down(&mut self, col: u16, row: u16) {
+        self.selection_start = Some((col, row));
+        self.selection_end = Some((col, row));
+    }
+
+    fn mouse_drag(&mut self, col: u16, row: u16) {
+        if self.selection_start.is_some() {
+            self.selection_end = Some((col, row));
+        }
+    }
+
+    fn mouse_up(&mut self, col: u16, row: u16) {
+        self.selection_end = Some((col, row));
+        self.finalize_selection();
+    }
+
+    /// Extracts the selected text from `row_text` and, if `auto_copy` is on,
+    /// copies it via OSC52 and shows a transient status-bar message.
+    fn finalize_selection(&mut self) {
+        let (start, end) = match (self.selection_start.take(), self.selection_end.take()) {
+            (Some(s), Some(e)) => (s, e),
+            _ => return,
+        };
+        let text = extract_selection(&self.row_text, start, end);
+        if text.is_empty() || !self.auto_copy {
+            return;
+        }
+        copy_to_clipboard(&text);
+        self.flash = Some((format!("copiado {} chars · /config desativa", text.chars().count()), Instant::now()));
     }
 
     fn submit(&mut self) {
@@ -385,6 +429,56 @@ fn truncate_title(text: &str) -> String {
     format!("{truncated}...")
 }
 
+/// Extracts selected text from `row_text` (absolute-row text captured during
+/// the last draw). Same row -> column slice; multi-row -> whole lines joined
+/// with `\n`, trailing spaces trimmed.
+fn extract_selection(row_text: &[String], start: (u16, u16), end: (u16, u16)) -> String {
+    let (mut c0, mut r0) = start;
+    let (mut c1, mut r1) = end;
+    if r0 > r1 || (r0 == r1 && c0 > c1) {
+        std::mem::swap(&mut c0, &mut c1);
+        std::mem::swap(&mut r0, &mut r1);
+    }
+    if r0 == r1 {
+        let row = row_text.get(r0 as usize).map(String::as_str).unwrap_or("");
+        let chars: Vec<char> = row.chars().collect();
+        let lo = (c0 as usize).min(chars.len());
+        let hi = ((c1 as usize) + 1).min(chars.len()).max(lo);
+        chars[lo..hi].iter().collect::<String>().trim_end().to_string()
+    } else {
+        (r0..=r1)
+            .map(|r| row_text.get(r as usize).map(|s| s.trim_end().to_string()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Wraps an OSC52 clipboard-set sequence for tmux passthrough when running
+/// inside a tmux session (`$TMUX` set), doubling internal ESCs per the tmux
+/// passthrough protocol.
+fn osc52_sequence(text: &str) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    let encoded = STANDARD.encode(text.as_bytes());
+    let seq = format!("\x1b]52;c;{encoded}\x07");
+    if std::env::var_os("TMUX").is_some() {
+        let escaped = seq.replace('\x1b', "\x1b\x1b");
+        format!("\x1bPtmux;\x1b{escaped}\x1b\\")
+    } else {
+        seq
+    }
+}
+
+/// Writes the OSC52 clipboard-set sequence directly to stdout, bypassing
+/// ratatui's buffer (raw mode is on, so this reaches the terminal untouched).
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    let seq = osc52_sequence(text);
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(seq.as_bytes());
+    let _ = stdout.flush();
+}
+
 /// Coarse relative-time label ("agora", "2h", "3d") for a past `ts` (unix
 /// seconds) compared to `now`.
 fn rel_time(ts: u64, now: u64) -> String {
@@ -529,7 +623,7 @@ fn save_theme_to_config(theme: &str) -> Result<()> {
 pub fn run(config: &Config, repo: &str) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -538,7 +632,7 @@ pub fn run(config: &Config, repo: &str) -> Result<()> {
     let result = event_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     result
 }
@@ -547,7 +641,13 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
     let mut last_poll = Instant::now();
     loop {
         app.drain_stream();
+        if let Some((_, ts)) = &app.flash {
+            if ts.elapsed() >= Duration::from_secs(2) {
+                app.flash = None;
+            }
+        }
         terminal.draw(|f| draw(f.area(), f.buffer_mut(), app))?;
+        app.row_text = capture_row_text(terminal.current_buffer_mut());
 
         if last_poll.elapsed() >= Duration::from_secs(1) {
             app.refresh_agents();
@@ -556,48 +656,68 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
         }
 
         if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    break;
-                }
-                match app.mode {
-                    Mode::ThemePicker { .. } => match key.code {
-                        KeyCode::Up => app.picker_move(-1),
-                        KeyCode::Down => app.picker_move(1),
-                        KeyCode::Enter => app.picker_confirm(),
-                        KeyCode::Esc => app.picker_cancel(),
-                        _ => {}
-                    },
-                    Mode::ResumePicker { .. } => match key.code {
-                        KeyCode::Up => app.resume_picker_move(-1),
-                        KeyCode::Down => app.resume_picker_move(1),
-                        KeyCode::Enter => app.resume_picker_confirm(),
-                        KeyCode::Esc => app.resume_picker_cancel(),
-                        _ => {}
-                    },
-                    Mode::Normal => match key.code {
-                        KeyCode::Char(c) => app.input.push(c),
-                        KeyCode::Backspace => {
-                            app.input.pop();
-                        }
-                        KeyCode::Enter => {
-                            let line = app.input.trim().to_string();
-                            if matches!(line.as_str(), "/quit" | "/q" | "quit" | "exit" | ":q") {
-                                break;
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        break;
+                    }
+                    match app.mode {
+                        Mode::ThemePicker { .. } => match key.code {
+                            KeyCode::Up => app.picker_move(-1),
+                            KeyCode::Down => app.picker_move(1),
+                            KeyCode::Enter => app.picker_confirm(),
+                            KeyCode::Esc => app.picker_cancel(),
+                            _ => {}
+                        },
+                        Mode::ResumePicker { .. } => match key.code {
+                            KeyCode::Up => app.resume_picker_move(-1),
+                            KeyCode::Down => app.resume_picker_move(1),
+                            KeyCode::Enter => app.resume_picker_confirm(),
+                            KeyCode::Esc => app.resume_picker_cancel(),
+                            _ => {}
+                        },
+                        Mode::Normal => match key.code {
+                            KeyCode::Char(c) => app.input.push(c),
+                            KeyCode::Backspace => {
+                                app.input.pop();
                             }
-                            app.submit();
-                        }
-                        KeyCode::Esc => break,
-                        _ => {}
-                    },
+                            KeyCode::Enter => {
+                                let line = app.input.trim().to_string();
+                                if matches!(line.as_str(), "/quit" | "/q" | "quit" | "exit" | ":q") {
+                                    break;
+                                }
+                                app.submit();
+                            }
+                            KeyCode::Esc => break,
+                            _ => {}
+                        },
+                    }
                 }
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::Down(MouseButton::Left) => app.mouse_down(m.column, m.row),
+                    MouseEventKind::Drag(MouseButton::Left) => app.mouse_drag(m.column, m.row),
+                    MouseEventKind::Up(MouseButton::Left) => app.mouse_up(m.column, m.row),
+                    _ => {}
+                },
+                _ => {}
             }
         }
     }
     Ok(())
+}
+
+/// Snapshots the last-rendered frame into per-row plain text (no styling),
+/// used to resolve a mouse selection's column/row range into real text.
+fn capture_row_text(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+    let area = buf.area;
+    (0..area.height)
+        .map(|y| {
+            (0..area.width).map(|x| buf.cell((area.x + x, area.y + y)).map(|c| c.symbol()).unwrap_or(" ")).collect::<String>()
+        })
+        .collect()
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -805,6 +925,13 @@ fn draw_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &
 }
 
 fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
+    if let Some((msg, ts)) = &app.flash {
+        if ts.elapsed() < Duration::from_secs(2) {
+            let line = Line::from(styled(theme, Role::Accent, msg.clone()));
+            Paragraph::new(line).render(area, buf);
+            return;
+        }
+    }
     let running = app.agents.iter().filter(|a| a.state == AgentState::Running).count();
     let ready = app.agents.iter().filter(|a| a.state == AgentState::Done).count();
     let line = Line::from(vec![
@@ -995,5 +1122,74 @@ mod tests {
         app.picker_cancel();
         assert!(matches!(app.mode, Mode::Normal));
         assert_eq!(app.theme, "hacker");
+    }
+
+    #[test]
+    fn extract_selection_same_row_slices_columns() {
+        let rows = vec!["hello world".to_string()];
+        assert_eq!(extract_selection(&rows, (0, 0), (4, 0)), "hello");
+        assert_eq!(extract_selection(&rows, (6, 0), (10, 0)), "world");
+    }
+
+    #[test]
+    fn extract_selection_normalizes_reversed_range() {
+        let rows = vec!["hello world".to_string()];
+        assert_eq!(extract_selection(&rows, (4, 0), (0, 0)), "hello");
+    }
+
+    #[test]
+    fn extract_selection_multi_row_joins_whole_lines_trimmed() {
+        let rows = vec!["first   ".to_string(), "second".to_string(), "third  ".to_string()];
+        assert_eq!(extract_selection(&rows, (2, 0), (3, 2)), "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn extract_selection_empty_when_row_missing() {
+        let rows = vec!["only".to_string()];
+        assert_eq!(extract_selection(&rows, (0, 5), (2, 5)), "");
+    }
+
+    #[test]
+    fn osc52_sequence_wraps_plain_when_no_tmux() {
+        std::env::remove_var("TMUX");
+        let seq = osc52_sequence("hi");
+        assert!(seq.starts_with("\x1b]52;c;"));
+        assert!(seq.ends_with('\x07'));
+        assert!(!seq.contains("Ptmux"));
+    }
+
+    #[test]
+    fn osc52_sequence_wraps_tmux_passthrough_when_in_tmux() {
+        std::env::set_var("TMUX", "/tmp/tmux-1000/default,1234,0");
+        let seq = osc52_sequence("hi");
+        std::env::remove_var("TMUX");
+        assert!(seq.starts_with("\x1bPtmux;\x1b"));
+        assert!(seq.ends_with("\x1b\\"));
+        // inner ESCs from the wrapped OSC52 must be doubled
+        assert!(seq.contains("\x1b\x1b]52;c;"));
+    }
+
+    #[test]
+    fn mouse_selection_flow_copies_text_and_sets_flash() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.row_text = vec!["select me please".to_string()];
+        app.mouse_down(0, 0);
+        app.mouse_drag(9, 0);
+        app.mouse_up(9, 0);
+        assert!(app.flash.is_some());
+        assert!(app.selection_start.is_none());
+        assert!(app.selection_end.is_none());
+    }
+
+    #[test]
+    fn mouse_selection_skips_copy_when_auto_copy_disabled() {
+        let mut config = Config::default();
+        config.ui.insert("auto_copy".into(), "false".into());
+        let mut app = App::new(&config, "/tmp/repo");
+        app.row_text = vec!["select me please".to_string()];
+        app.mouse_down(0, 0);
+        app.mouse_up(9, 0);
+        assert!(app.flash.is_none());
     }
 }
