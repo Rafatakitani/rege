@@ -108,6 +108,7 @@ struct App {
     logdir: PathBuf,
     master_session: String,
     buddy: Option<crate::buddy::Buddy>,
+    buddy_tick: usize,
 }
 
 impl App {
@@ -131,6 +132,7 @@ impl App {
             logdir: std::env::temp_dir().join("regente-logs"),
             master_session: "regente-master".into(),
             buddy: None,
+            buddy_tick: 0,
         }
     }
 
@@ -227,7 +229,7 @@ impl App {
             "/buddy" => match parts.next() {
                 None => {
                     let seed = buddy_seed();
-                    self.buddy = Some(crate::buddy::hatch(&seed));
+                    self.buddy = Some(crate::buddy::Buddy::hatch(&seed));
                 }
                 Some("pet") => {
                     if let Some(buddy) = self.buddy.as_mut() {
@@ -398,6 +400,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
 
         if last_poll.elapsed() >= Duration::from_secs(1) {
             app.refresh_agents();
+            app.buddy_tick = app.buddy_tick.wrapping_add(1);
             last_poll = Instant::now();
         }
 
@@ -527,14 +530,21 @@ fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &s
     }
 
     if let Some(buddy) = &app.buddy {
-        draw_buddy_widget(area, buf, buddy, theme);
+        draw_buddy_widget(area, buf, buddy, app.buddy_tick, theme);
     }
 }
 
 /// Floating widget pinned to the bottom-right corner of the chat area,
 /// persistent across turns once a buddy has been hatched via `/buddy`.
-fn draw_buddy_widget(area: Rect, buf: &mut ratatui::buffer::Buffer, buddy: &crate::buddy::Buddy, theme: &str) {
-    let lines = buddy.widget_lines();
+/// Advances one animation frame per tick (~1s, driven by the event loop).
+fn draw_buddy_widget(
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    buddy: &crate::buddy::Buddy,
+    tick: usize,
+    theme: &str,
+) {
+    let lines = buddy.render_lines(tick);
     let width: u16 = 24;
     let height = (lines.len() as u16 + 3).min(area.height);
     if area.width < width + 2 || area.height < height {
