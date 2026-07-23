@@ -5,14 +5,17 @@ mod agent;
 mod command;
 mod config;
 mod engine;
+mod mcp;
 mod playbook;
+mod session;
 mod tmux;
 mod worktree;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config::Config;
-use std::path::PathBuf;
+use session::Session;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser)]
@@ -33,6 +36,12 @@ enum Cmd {
     Doctor,
     /// Mostra a config efetiva.
     Config,
+    /// Roda o servidor MCP (JSON-RPC 2.0 newline-delimited sobre stdio).
+    McpServe {
+        /// Repo alvo pros agentes/worktrees.
+        #[arg(long)]
+        repo: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -49,6 +58,7 @@ fn main() -> Result<()> {
             print!("{}", serde_yaml::to_string(&cfg)?);
             Ok(())
         }
+        Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
         None => {
             // TUI (ratatui) chega no proximo bloco.
             eprintln!("regente: TUI em construcao. Use `regente exec \"<tarefa>\"` ou `regente doctor`.");
@@ -70,6 +80,16 @@ fn exec(cfg: &Config, task: &str) -> Result<()> {
     let bin = a.remove(0);
     let status = Command::new(bin).args(&a).status()?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Instantiate a Session/Engine for `repo` and serve MCP over stdin/stdout.
+fn mcp_serve(home: &Path, repo: &Path) -> Result<()> {
+    let cfg = Config::load(Some(repo), home)?;
+    let session = Session::new(repo, &cfg);
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut server = mcp::Server::new(session, stdin.lock(), stdout.lock());
+    server.run()
 }
 
 fn doctor(cfg: &Config) -> Result<()> {

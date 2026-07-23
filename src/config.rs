@@ -31,6 +31,8 @@ pub struct Config {
     pub pr: BTreeMap<String, String>,
     pub sandbox: BTreeMap<String, bool>,
     pub ui: BTreeMap<String, String>,
+    #[serde(default)]
+    pub verify: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -58,6 +60,7 @@ impl Default for Config {
             pr: smap(&[("provider", "github"), ("branch_prefix", "regente")]),
             sandbox: bmap(&[("enabled", true), ("yolo", true)]),
             ui: smap(&[("theme", "hacker")]),
+            verify: BTreeMap::new(),
         }
     }
 }
