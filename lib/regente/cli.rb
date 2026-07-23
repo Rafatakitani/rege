@@ -31,7 +31,8 @@ module Regente
       when "config"    then cmd_config(argv[1..])
       when "attach"    then cmd_attach
       when "version", "-v", "--version" then @stdout.puts("regente #{VERSION}"); 0
-      when "help", "-h", "--help", nil then usage; 0
+      when "help", "-h", "--help" then usage; 0
+      when nil then cmd_home
       else cmd_launch(argv)
       end
     rescue Regente::Error => e
@@ -64,6 +65,18 @@ module Regente
         @stdout.puts("  #{ok ? '✓' : '✗'} #{cli}")
       end
       0
+    end
+
+    # Bare `regente`: open the full-screen TUI when interactive; else usage.
+    def cmd_home
+      if @stdout.respond_to?(:tty?) && @stdout.tty?
+        TUI.new(config: config, repo: @cwd, out: @stdout,
+                probe_runner: @probe_runner, exe: exe_path).run
+        0
+      else
+        usage
+        0
+      end
     end
 
     def cmd_config(args)
