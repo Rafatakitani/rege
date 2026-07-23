@@ -59,9 +59,10 @@ fn exec(cfg: &Config, task: &str) -> Result<()> {
         eprintln!("uso: regente exec \"<tarefa>\"");
         std::process::exit(2);
     }
-    let seed = format!("{}\n\nTarefa: {}", playbook::prompt(cfg), task);
+    // exec = headless coding agent (like `codex exec`): runs the task directly.
+    // The orchestrator playbook is for the interactive TUI, not exec.
     let yolo = cfg.sandbox.get("yolo").copied().unwrap_or(true);
-    let mut a = command::argv(&cfg.master.cli, &seed, cfg.master.model.as_deref(), yolo)?;
+    let mut a = command::argv(&cfg.master.cli, task, cfg.master.model.as_deref(), yolo)?;
     let bin = a.remove(0);
     let status = Command::new(bin).args(&a).status()?;
     std::process::exit(status.code().unwrap_or(1));

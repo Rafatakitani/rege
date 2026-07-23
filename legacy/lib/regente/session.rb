@@ -30,7 +30,11 @@ module Regente
     end
 
     def agent_status(agent_id:)
-      with_agent(agent_id) { |a| { agent_id: agent_id, state: a.refresh } }
+      with_agent(agent_id) do |a|
+        state = a.refresh
+        a.commit if state == :done # persist worker's work so diff/collect works
+        { agent_id: agent_id, state: state }
+      end
     end
 
     def read_output(agent_id:)
@@ -52,7 +56,10 @@ module Regente
     end
 
     def diff_agent(agent_id:)
-      with_agent(agent_id) { |a| { agent_id: agent_id, diff: a.diff } }
+      with_agent(agent_id) do |a|
+        a.commit if a.refresh == :done # ensure committed before diffing
+        { agent_id: agent_id, diff: a.diff }
+      end
     end
 
     def review(agent_ids:)
