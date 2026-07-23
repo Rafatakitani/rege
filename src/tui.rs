@@ -107,6 +107,7 @@ struct App {
     agents: Vec<AgentRow>,
     logdir: PathBuf,
     master_session: String,
+    buddy: Option<crate::buddy::Buddy>,
 }
 
 impl App {
@@ -129,7 +130,14 @@ impl App {
             agents: Vec::new(),
             logdir: std::env::temp_dir().join("regente-logs"),
             master_session: "regente-master".into(),
+            buddy: None,
         }
+    }
+
+    /// True once the user has sent at least one message — controls whether
+    /// the wordmark banner still shows atop the chat.
+    fn conversation_started(&self) -> bool {
+        self.chat.iter().any(|m| matches!(m.role, ChatRole::User))
     }
 
     fn push(&mut self, role: ChatRole, text: impl Into<String>) {
@@ -216,11 +224,56 @@ impl App {
                     self.push(ChatRole::Info, names.join(", "));
                 }
             }
+            "/buddy" => match parts.next() {
+                None => {
+                    let seed = buddy_seed();
+                    let buddy = crate::buddy::hatch(&seed);
+                    let lines = buddy.render();
+                    self.buddy = Some(buddy);
+                    for line in lines {
+                        self.push(ChatRole::Assistant, line);
+                    }
+                }
+                Some("pet") => {
+                    if let Some(buddy) = self.buddy.as_mut() {
+                        let reaction = buddy.pet();
+                        self.push(ChatRole::Assistant, reaction);
+                    } else {
+                        self.push(ChatRole::Info, "/buddy primeiro");
+                    }
+                }
+                Some(other) => {
+                    self.push(ChatRole::Error, format!("subcomando desconhecido: {other}"));
+                }
+            },
             other => {
                 self.push(ChatRole::Error, format!("comando desconhecido: {other}"));
             }
         }
     }
+}
+
+/// Seed for hatching the buddy: `$USER`, else `$HOSTNAME`/`hostname(1)`, else "regente".
+fn buddy_seed() -> String {
+    if let Ok(user) = std::env::var("USER") {
+        if !user.is_empty() {
+            return user;
+        }
+    }
+    if let Ok(host) = std::env::var("HOSTNAME") {
+        if !host.is_empty() {
+            return host;
+        }
+    }
+    if let Ok(out) = Command::new("hostname").output() {
+        if out.status.success() {
+            let host = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !host.is_empty() {
+                return host;
+            }
+        }
+    }
+    "regente".to_string()
 }
 
 fn list_agents(logdir: &PathBuf, master_session: &str) -> Vec<AgentRow> {
@@ -444,6 +497,16 @@ fn draw_header(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: 
     Paragraph::new(line).render(area, buf);
 }
 
+/// REGENTE wordmark, block letters, shown atop the chat only before the
+/// first user message — sober, no glow, just the desaturated dim tone.
+const BANNER: [&str; 5] = [
+    "████  █████ ████  █████ ██  ██ █████ █████",
+    "██ ██ ██    ██    ██    ███ ██   █   ██   ",
+    "████  ████  ██ ██ ████  ██████   █   ████ ",
+    "██ ██ ██    ██ ██ ██    ██ ███   █   ██   ",
+    "██ ██ █████ ████  █████ ██  ██   █   █████",
+];
+
 fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     let inner = Rect {
         x: area.x + 2,
@@ -451,7 +514,37 @@ fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &s
         width: area.width.saturating_sub(4),
         height: area.height,
     };
-    let rows = inner.height as usize;
+
+    if app.conversation_started() {
+        render_messages(inner, buf, app, theme);
+        return;
+    }
+
+    let banner_height = (BANNER.len() as u16 + 1).min(inner.height);
+    let banner_rect = Rect { x: inner.x, y: inner.y, width: inner.width, height: banner_height };
+    draw_banner(banner_rect, buf, theme);
+
+    let rest = Rect {
+        x: inner.x,
+        y: inner.y + banner_height,
+        width: inner.width,
+        height: inner.height.saturating_sub(banner_height),
+    };
+    render_messages(rest, buf, app, theme);
+}
+
+fn draw_banner(area: Rect, buf: &mut ratatui::buffer::Buffer, theme: &str) {
+    let width = BANNER[0].chars().count() as u16;
+    let pad = area.width.saturating_sub(width) / 2;
+    let lines: Vec<Line> = BANNER
+        .iter()
+        .map(|row| Line::from(styled(theme, Role::Dim, format!("{}{}", " ".repeat(pad as usize), row))))
+        .collect();
+    Paragraph::new(lines).render(area, buf);
+}
+
+fn render_messages(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
+    let rows = area.height as usize;
     let msgs: Vec<Line> = app
         .chat
         .iter()
@@ -460,7 +553,7 @@ fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &s
         .rev()
         .map(|m| chat_line(theme, m))
         .collect();
-    Paragraph::new(msgs).render(inner, buf);
+    Paragraph::new(msgs).render(area, buf);
 }
 
 fn chat_line(theme: &str, m: &ChatMsg) -> Line<'static> {
@@ -520,7 +613,7 @@ fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, them
         styled(theme, Role::Accent, running.to_string()),
         styled(theme, Role::Dim, " rodando · "),
         styled(theme, Role::Accent, ready.to_string()),
-        styled(theme, Role::Dim, " pronto · /theme · /agents · /model · /quit"),
+        styled(theme, Role::Dim, " pronto · /theme · /agents · /buddy · /model · /quit"),
     ]);
     Paragraph::new(line).render(area, buf);
 }

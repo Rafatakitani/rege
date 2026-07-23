@@ -2,6 +2,7 @@
 #![allow(dead_code)] // WIP: modules land incrementally
 
 mod agent;
+mod buddy;
 mod command;
 mod config;
 mod engine;
