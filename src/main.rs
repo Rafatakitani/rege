@@ -1,8 +1,10 @@
 //! regente — orquestrador multi-agente de IAs (Rust).
 #![allow(dead_code)] // WIP: modules land incrementally
 
+mod agent;
 mod command;
 mod config;
+mod engine;
 mod playbook;
 mod tmux;
 mod worktree;
