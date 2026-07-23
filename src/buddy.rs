@@ -45,24 +45,92 @@ struct Species {
 }
 
 const SPECIES: &[Species] = &[
-    Species { key: "duck", name_pt: "pato", art: &["  __", "<(o )___", " ( ._> /", "  `---'"] },
-    Species { key: "goose", name_pt: "ganso", art: &[" ,_?", " )_)-<", " \" \""] },
+    Species {
+        key: "duck",
+        name_pt: "pato",
+        art: &["  __", " <(° )___", "  ( ._> /", "   `---'"],
+    },
+    Species {
+        key: "goose",
+        name_pt: "ganso",
+        art: &["   ,", "  ,)__)---<", " ('   ˘ )", "   \" \" \""],
+    },
     Species { key: "cat", name_pt: "gato", art: &[" /\\_/\\", "( o.o )", " > ^ <"] },
-    Species { key: "rabbit", name_pt: "coelho", art: &[" (\\(\\", " (-.-)", "o_(\")(\")"] },
-    Species { key: "owl", name_pt: "coruja", art: &["  ,___,", "  (o,o)", "  (\")_(\")"] },
-    Species { key: "penguin", name_pt: "pinguim", art: &["  (o_o)", " /|_|\\", "  ' '"] },
-    Species { key: "turtle", name_pt: "tartaruga", art: &["  _____", " /,---.\\", " \\|o o|/", "  `---`"] },
-    Species { key: "snail", name_pt: "caracol", art: &["  _@/", " /o \\", "(____)"] },
-    Species { key: "dragon", name_pt: "dragao", art: &["  /\\  /\\", " ((oo))~~", "  \\  /"] },
-    Species { key: "octopus", name_pt: "polvo", art: &[" .-\"\"-.", "/ o  o \\", "\\_/\\/\\_/", " ' ' ' '"] },
-    Species { key: "axolotl", name_pt: "axolote", art: &[" ^  ^", "(o..o)", " \\__/~~"] },
-    Species { key: "ghost", name_pt: "fantasma", art: &[" .-.", "(o o)", " |=| ", " ~~~"] },
-    Species { key: "robot", name_pt: "robo", art: &["[o_o]", "/|_|\\", " d b"] },
-    Species { key: "blob", name_pt: "geleia", art: &[" .-\"-.", "( o o )", " \\___/ "] },
-    Species { key: "cactus", name_pt: "cacto", art: &[" \\|||/", "(o   o)", " |||||"] },
-    Species { key: "mushroom", name_pt: "cogumelo", art: &["  ___", " /...\\", "  | |"] },
-    Species { key: "chonk", name_pt: "gordinho", art: &[" /\\_/\\", "( o.o )~", "(\")_(\") big"] },
-    Species { key: "capybara", name_pt: "capivara", art: &["______", "(o.o  )", "(_____)"] },
+    Species {
+        key: "rabbit",
+        name_pt: "coelho",
+        art: &[" (\\(\\ ", " ( ˘.˘)", " o(\")(\")"],
+    },
+    Species {
+        key: "owl",
+        name_pt: "coruja",
+        art: &["  ,___,", "  (◕,◕)", "  (\")_(\")"],
+    },
+    Species {
+        key: "penguin",
+        name_pt: "pinguim",
+        art: &["  (•_•)", " <)   )╯", "  /   \\"],
+    },
+    Species {
+        key: "turtle",
+        name_pt: "tartaruga",
+        art: &["  ___", " /o.o\\", "( ⌣  )", " \\___/", "  ^ ^"],
+    },
+    Species {
+        key: "snail",
+        name_pt: "caracol",
+        art: &["    @", "   /_\\", "  (o.o)", "  ~~~~~"],
+    },
+    Species {
+        key: "dragon",
+        name_pt: "dragao",
+        art: &["  /\\_/\\", " ((>^<))~", "  \\_ _/", "   ^ ^"],
+    },
+    Species {
+        key: "octopus",
+        name_pt: "polvo",
+        art: &["  .-\"\"-.", " ( ◕  ◕ )", "  \\ ‿‿ /", " /|/  \\|\\"],
+    },
+    Species {
+        key: "axolotl",
+        name_pt: "axolote",
+        art: &["  ^  ^", " (o..o)", "  \\__/~", "  . .  ."],
+    },
+    Species {
+        key: "ghost",
+        name_pt: "fantasma",
+        art: &["   .-.", "  (o o)", "   |Ø|", "   ~~~"],
+    },
+    Species {
+        key: "robot",
+        name_pt: "robo",
+        art: &[" [ o_o ]", " /|_|_|\\", "  d   b"],
+    },
+    Species {
+        key: "blob",
+        name_pt: "geleia",
+        art: &["  .-\"\"-.", " ( o  o )", "  \\ ◡◡ /", "  `-...-`"],
+    },
+    Species {
+        key: "cactus",
+        name_pt: "cacto",
+        art: &["   \\|/", "  --(•‿•)--", "   /|||\\", "    |||"],
+    },
+    Species {
+        key: "mushroom",
+        name_pt: "cogumelo",
+        art: &["   ___", " /(°.°)\\", " \\_____/", "   | |"],
+    },
+    Species {
+        key: "chonk",
+        name_pt: "gordinho",
+        art: &["  /\\_/\\", " (=^.^=)", " (\")___(\")"],
+    },
+    Species {
+        key: "capybara",
+        name_pt: "capivara",
+        art: &["  _______", " (o  .  o)", " (========)"],
+    },
 ];
 
 #[derive(Clone, Debug)]
@@ -137,6 +205,18 @@ impl Buddy {
         }
         lines
     }
+
+    /// ASCII art + compact "especie · rarity" + 1 line of key stats, for the
+    /// floating widget (as opposed to `render`, which is chat-log formatted).
+    pub fn widget_lines(&self) -> Vec<String> {
+        let species = SPECIES.iter().find(|s| s.key == self.species).expect("known species");
+        let mut lines: Vec<String> = species.art.iter().map(|l| l.to_string()).collect();
+        lines.push(format!("{} · {}", species.name_pt, self.rarity.label()));
+        let humor = self.stats.get("humor").copied().unwrap_or(0);
+        let energia = self.stats.get("energia").copied().unwrap_or(0);
+        lines.push(format!("♥ {:<3}⚡ {}", humor, energia));
+        lines
+    }
 }
 
 fn bump(stats: &mut BTreeMap<String, u8>, key: &str, amount: u8) {
@@ -193,5 +273,22 @@ mod tests {
         let lines = buddy.render();
         assert!(lines.len() > 4);
         assert!(lines.iter().any(|l| l.contains(buddy.rarity.label())));
+    }
+
+    #[test]
+    fn widget_lines_has_art_header_and_stats() {
+        let buddy = hatch("regente");
+        let lines = buddy.widget_lines();
+        assert!(lines.len() >= 4);
+        assert!(lines.iter().any(|l| l.contains(buddy.rarity.label())));
+        assert!(lines.last().unwrap().contains('♥'));
+    }
+
+    #[test]
+    fn all_species_have_art() {
+        for species in SPECIES {
+            assert!(!species.art.is_empty());
+            assert!(species.art.len() <= 5);
+        }
     }
 }

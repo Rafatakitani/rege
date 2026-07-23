@@ -227,12 +227,7 @@ impl App {
             "/buddy" => match parts.next() {
                 None => {
                     let seed = buddy_seed();
-                    let buddy = crate::buddy::hatch(&seed);
-                    let lines = buddy.render();
-                    self.buddy = Some(buddy);
-                    for line in lines {
-                        self.push(ChatRole::Assistant, line);
-                    }
+                    self.buddy = Some(crate::buddy::hatch(&seed));
                 }
                 Some("pet") => {
                     if let Some(buddy) = self.buddy.as_mut() {
@@ -517,20 +512,52 @@ fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &s
 
     if app.conversation_started() {
         render_messages(inner, buf, app, theme);
-        return;
+    } else {
+        let banner_height = (BANNER.len() as u16 + 1).min(inner.height);
+        let banner_rect = Rect { x: inner.x, y: inner.y, width: inner.width, height: banner_height };
+        draw_banner(banner_rect, buf, theme);
+
+        let rest = Rect {
+            x: inner.x,
+            y: inner.y + banner_height,
+            width: inner.width,
+            height: inner.height.saturating_sub(banner_height),
+        };
+        render_messages(rest, buf, app, theme);
     }
 
-    let banner_height = (BANNER.len() as u16 + 1).min(inner.height);
-    let banner_rect = Rect { x: inner.x, y: inner.y, width: inner.width, height: banner_height };
-    draw_banner(banner_rect, buf, theme);
+    if let Some(buddy) = &app.buddy {
+        draw_buddy_widget(area, buf, buddy, theme);
+    }
+}
 
-    let rest = Rect {
-        x: inner.x,
-        y: inner.y + banner_height,
-        width: inner.width,
-        height: inner.height.saturating_sub(banner_height),
+/// Floating widget pinned to the bottom-right corner of the chat area,
+/// persistent across turns once a buddy has been hatched via `/buddy`.
+fn draw_buddy_widget(area: Rect, buf: &mut ratatui::buffer::Buffer, buddy: &crate::buddy::Buddy, theme: &str) {
+    let lines = buddy.widget_lines();
+    let width: u16 = 24;
+    let height = (lines.len() as u16 + 3).min(area.height);
+    if area.width < width + 2 || area.height < height {
+        return;
+    }
+    let rect = Rect {
+        x: area.right().saturating_sub(width + 1),
+        y: area.bottom().saturating_sub(height + 1),
+        width,
+        height,
     };
-    render_messages(rest, buf, app, theme);
+
+    Paragraph::new("").render(rect, buf);
+
+    let block = rounded_block(theme, "", Role::Accent);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let text: Vec<Line> = lines
+        .into_iter()
+        .map(|l| Line::from(styled(theme, Role::Accent, l)))
+        .collect();
+    Paragraph::new(text).render(inner, buf);
 }
 
 fn draw_banner(area: Rect, buf: &mut ratatui::buffer::Buffer, theme: &str) {
