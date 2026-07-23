@@ -127,7 +127,8 @@ module Regente
     end
 
     def chat(text)
-      @out.puts("\n#{prompt_label}#{text}\n")
+      # Reline already echoed the prompt+input; just stream the reply.
+      @out.puts
       driver.send_turn(text) do |ev|
         line = format_event(ev)
         @out.puts(line) if line
@@ -170,7 +171,8 @@ module Regente
     end
 
     def read_line
-      Reline.readline("\n#{prompt_label}", true)
+      @out.puts # blank line above the prompt (never inside the Reline prompt)
+      Reline.readline(prompt_label, true)
     rescue Interrupt
       nil
     end
