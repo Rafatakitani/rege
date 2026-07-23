@@ -75,6 +75,29 @@ class TUITest < Minitest::Test
     end
   end
 
+  def test_render_dashboard_shows_worker_rows
+    with_temp_repo do |repo|
+      cfg = Regente::Config.load(project_dir: repo, home: repo)
+      t = Regente::TUI.new(config: cfg, repo: repo, out: StringIO.new, color: false)
+      rows = [Regente::Dashboard::Row.new(name: "a1", state: :running, last: "editando"),
+              Regente::Dashboard::Row.new(name: "a2", state: :done, last: "pronto")]
+      dash = t.render_dashboard(rows)
+      assert_includes dash, "AGENTES"
+      assert_includes dash, "a1"
+      assert_includes dash, "running"
+      assert_includes dash, "a2"
+      assert_includes dash, "done"
+    end
+  end
+
+  def test_render_dashboard_empty
+    with_temp_repo do |repo|
+      cfg = Regente::Config.load(project_dir: repo, home: repo)
+      t = Regente::TUI.new(config: cfg, repo: repo, out: StringIO.new, color: false)
+      assert_includes t.render_dashboard([]), "nenhum agente ativo"
+    end
+  end
+
   def test_bare_cli_non_tty_shows_usage_not_tui
     with_temp_repo do |repo|
       out = StringIO.new # not a tty -> must not enter Reline loop

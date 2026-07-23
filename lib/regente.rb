@@ -7,7 +7,7 @@ require_relative "regente/config"
   path = File.join(__dir__, "regente", "#{mod}.rb")
   require path if File.exist?(path)
 end
-%w[mcp/tools mcp/server playbook master stream master_driver theme tui cli].each do |mod|
+%w[mcp/tools mcp/server playbook master stream master_driver theme dashboard tui cli].each do |mod|
   path = File.join(__dir__, "regente", "#{mod}.rb")
   require path if File.exist?(path)
 end

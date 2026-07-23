@@ -8,8 +8,11 @@ module Regente
   # (Regente::Theme). We render the master conversation natively (streamed),
   # instead of handing off to an external CLI's interface.
   class TUI
-    def initialize(config:, repo:, out: $stdout, color: true,
-                   launcher: nil, probe_runner: nil, exe: "regente", driver: nil)
+    STATE_ICON = { running: "◍", done: "●", failed: "✗", unknown: "○", idle: "○" }.freeze
+    STATE_ROLE = { running: :warn, done: :ok, failed: :fail, unknown: :dim, idle: :dim }.freeze
+
+    def initialize(config:, repo:, out: $stdout, color: true, launcher: nil,
+                   probe_runner: nil, exe: "regente", driver: nil, dashboard: nil)
       @config = config
       @repo = repo
       @out = out
@@ -19,6 +22,7 @@ module Regente
       @probe_runner = probe_runner
       @exe = exe
       @driver = driver
+      @dashboard = dashboard
     end
 
     # ---- pure renderers -------------------------------------------------
@@ -55,12 +59,28 @@ module Regente
     end
 
     def footer
-      keys = [["/theme", "trocar tema"], ["/doctor", "checar bots"],
-              ["/config", "config"], ["/attach", "sessão externa"], ["/quit", "sair"]]
+      keys = [["/agents", "status IAs"], ["/theme", "tema"], ["/doctor", "checar bots"],
+              ["/config", "config"], ["/quit", "sair"]]
       paint(:dim, keys.map { |k, d| "#{k} #{d}" }.join("   ·   "))
     end
 
     def prompt_label = bold(paint(:accent, Theme.prompt(@theme)))
+
+    # Bottom "dashboard" of live worker status (data from tmux, cross-process).
+    def render_dashboard(rows = dashboard.workers)
+      out = ["", paint(:dim, "  ── AGENTES ──────────────────────────────")]
+      if rows.empty?
+        out << paint(:dim, "     nenhum agente ativo")
+      else
+        rows.each do |r|
+          icon = paint(STATE_ROLE.fetch(r.state, :dim), STATE_ICON.fetch(r.state, "○"))
+          out << "  #{icon} #{paint(:text, r.name.ljust(8))} " \
+                 "#{paint(STATE_ROLE.fetch(r.state, :dim), r.state.to_s.ljust(8))} " \
+                 "#{paint(:dim, truncate(r.last, 44))}"
+        end
+      end
+      out.join("\n")
+    end
 
     def format_event(ev)
       case ev.type
@@ -106,6 +126,7 @@ module Regente
       when "/doctor" then show_health
       when "/config" then @out.puts(@config.data.to_yaml)
       when %r{\A/theme\b} then cmd_theme(line.split[1])
+      when "/agents", "/ps" then @out.puts(render_dashboard)
       when "/attach" then attach_external
       when "/help", "/?" then @out.puts(footer)
       when %r{\A/} then @out.puts(paint(:fail, "comando desconhecido: #{line}"))
@@ -133,6 +154,7 @@ module Regente
         line = format_event(ev)
         @out.puts(line) if line
       end
+      @out.puts(render_dashboard) # show worker status after the turn
     rescue Regente::Error => e
       @out.puts(paint(:fail, e.message))
     end
@@ -141,6 +163,10 @@ module Regente
       @driver ||= MasterDriver.new(cli: @config.master["cli"], repo: @repo,
                                    prompt: Playbook.prompt(@config),
                                    model: @config.master["model"], exe: @exe)
+    end
+
+    def dashboard
+      @dashboard ||= Dashboard.new
     end
 
     def attach_external
