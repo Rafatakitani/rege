@@ -50,6 +50,18 @@ enum Cmd {
     },
     /// Abre o claude INTERATIVO ja como orquestrador Regente (playbook + MCP + yolo).
     Claude,
+    /// Renderiza um frame da TUI como texto (headless, sem tty) pra inspeção/debug.
+    Render {
+        /// Semeia estado de exemplo (chat + agentes).
+        #[arg(long)]
+        demo: bool,
+        /// Largura em colunas.
+        #[arg(long, default_value_t = 100)]
+        cols: u16,
+        /// Altura em linhas.
+        #[arg(long, default_value_t = 32)]
+        rows: u16,
+    },
 }
 
 fn main() -> Result<()> {
@@ -68,6 +80,11 @@ fn main() -> Result<()> {
         }
         Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
         Some(Cmd::Claude) => claude_orchestrator(&cfg),
+        Some(Cmd::Render { demo, cols, rows }) => {
+            let repo = cwd.to_string_lossy().to_string();
+            println!("{}", tui::render_frame(&cfg, &repo, cols, rows, demo));
+            Ok(())
+        }
         None => {
             let repo = cwd.to_string_lossy().to_string();
             tui::run(&cfg, &repo)

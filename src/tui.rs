@@ -151,7 +151,7 @@ impl App {
             repo: repo.to_string(),
             chat: vec![ChatMsg {
                 role: ChatRole::Info,
-                text: "Regente pronto. Digite uma tarefa. /theme abre o seletor, /quit sai.".into(),
+                text: "Regente pronto. Digite uma tarefa. /help lista comandos, /quit sai.".into(),
             }],
             input: String::new(),
             agents: Vec::new(),
@@ -373,6 +373,45 @@ impl App {
         let mut parts = line.split_whitespace();
         match parts.next().unwrap_or("") {
             "/quit" | "/q" => {}
+            "/help" | "/?" => {
+                self.push(ChatRole::Info, "comandos:");
+                self.push(ChatRole::Info, "  /help            esta lista");
+                self.push(ChatRole::Info, "  /theme [nome]    seletor de tema (sem arg abre picker)");
+                self.push(ChatRole::Info, "  /model [nome]    troca modelo do mestre (sem arg mostra atual)");
+                self.push(ChatRole::Info, "  /config          mostra config efetiva");
+                self.push(ChatRole::Info, "  /resume          retoma sessão anterior");
+                self.push(ChatRole::Info, "  /agents          lista agentes ativos");
+                self.push(ChatRole::Info, "  /buddy [pet]     bicho de estimação");
+                self.push(ChatRole::Info, "  /quit            sai (ou exit/quit/:q)");
+            }
+            "/model" => match parts.next() {
+                None => {
+                    let cur = self.master_model.clone().unwrap_or_else(|| "(default do CLI)".into());
+                    let cli = self.master_cli.clone();
+                    self.push(ChatRole::Info, format!("mestre: {cli} · modelo: {cur}"));
+                    self.push(ChatRole::Info, "troca com: /model <nome>  (ex: /model opus, /model sonnet)");
+                }
+                Some(name) => {
+                    self.master_model = Some(name.to_string());
+                    self.master = format!("{}/{}", self.master_cli, name);
+                    self.push(ChatRole::Info, format!("modelo do mestre: {name}"));
+                }
+            },
+            "/config" => {
+                let cur = self.master_model.clone().unwrap_or_else(|| "(default)".into());
+                let cli = self.master_cli.clone();
+                let theme = self.theme.clone();
+                let auto = self.auto_copy;
+                let repo = self.repo.clone();
+                let sess = self.sessions_path.display().to_string();
+                self.push(ChatRole::Info, "config efetiva:");
+                self.push(ChatRole::Info, format!("  mestre       {cli} / {cur}"));
+                self.push(ChatRole::Info, format!("  tema         {theme}"));
+                self.push(ChatRole::Info, format!("  auto_copy    {auto}"));
+                self.push(ChatRole::Info, format!("  repo         {repo}"));
+                self.push(ChatRole::Info, format!("  sessões      {sess}"));
+                self.push(ChatRole::Info, "edite ~/.config/regente/config.yml ou .regente.yml no projeto");
+            }
             "/theme" => match parts.next() {
                 None => self.open_theme_picker(),
                 Some(name) if theme::exists(name) => {
@@ -619,6 +658,34 @@ fn save_theme_to_config(theme: &str) -> Result<()> {
     Ok(())
 }
 
+/// Headless render: draw one frame to an off-screen buffer and return it as
+/// plain text (one line per row). No tty needed — used by `regente render` and
+/// tests so the TUI can be inspected without a real terminal. `demo` seeds a
+/// bit of chat/agent state so the layout is exercised.
+pub fn render_frame(config: &Config, repo: &str, cols: u16, rows: u16, demo: bool) -> String {
+    use ratatui::backend::TestBackend;
+    let mut app = App::new(config, repo);
+    if demo {
+        app.push(ChatRole::User, "refatora o modulo de auth e adiciona testes");
+        app.push(ChatRole::Assistant, "Tarefa difícil. Rodando 3 workers na mesma tarefa.");
+        app.push(ChatRole::Info, "⚙ spawn_agent · claude/sonnet · refatora auth");
+        app.agents = vec![
+            AgentRow { name: "a1".into(), state: AgentState::Running, last: "editando session.rs…".into() },
+            AgentRow { name: "a2".into(), state: AgentState::Done, last: "patch pronto".into() },
+        ];
+    }
+    let backend = TestBackend::new(cols, rows);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    let mut out = Vec::new();
+    terminal
+        .draw(|f| {
+            draw(f.area(), f.buffer_mut(), &app);
+            out = capture_row_text(f.buffer_mut());
+        })
+        .expect("draw");
+    out.join("\n")
+}
+
 /// Entry point: run the fullscreen TUI until the user quits.
 pub fn run(config: &Config, repo: &str) -> Result<()> {
     enable_raw_mode()?;
@@ -646,8 +713,12 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                 app.flash = None;
             }
         }
-        terminal.draw(|f| draw(f.area(), f.buffer_mut(), app))?;
-        app.row_text = capture_row_text(terminal.current_buffer_mut());
+        let mut rows = Vec::new();
+        terminal.draw(|f| {
+            draw(f.area(), f.buffer_mut(), app);
+            rows = capture_row_text(f.buffer_mut());
+        })?;
+        app.row_text = rows;
 
         if last_poll.elapsed() >= Duration::from_secs(1) {
             app.refresh_agents();
@@ -767,6 +838,46 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
     }
     if let Mode::ResumePicker { cursor } = app.mode {
         draw_resume_picker(area, buf, app, cursor);
+    }
+
+    // Live highlight while dragging a selection, so the user gets feedback
+    // even in terminals/tmux where the OSC52 copy is silently dropped.
+    if matches!(app.mode, Mode::Normal) {
+        if let (Some(start), Some(end)) = (app.selection_start, app.selection_end) {
+            highlight_selection(area, buf, start, end);
+        }
+    }
+}
+
+/// Reverse-videos every cell inside the selection range on the current frame.
+fn highlight_selection(area: Rect, buf: &mut ratatui::buffer::Buffer, start: (u16, u16), end: (u16, u16)) {
+    let (mut c0, mut r0) = start;
+    let (mut c1, mut r1) = end;
+    if r0 > r1 || (r0 == r1 && c0 > c1) {
+        std::mem::swap(&mut c0, &mut c1);
+        std::mem::swap(&mut r0, &mut r1);
+    }
+    for row in r0..=r1 {
+        if row < area.y || row >= area.y + area.height {
+            continue;
+        }
+        let (lo, hi) = if r0 == r1 {
+            (c0, c1)
+        } else if row == r0 {
+            (c0, area.x + area.width - 1)
+        } else if row == r1 {
+            (area.x, c1)
+        } else {
+            (area.x, area.x + area.width - 1)
+        };
+        for col in lo..=hi {
+            if col < area.x || col >= area.x + area.width {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((col, row)) {
+                cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+        }
     }
 }
 
@@ -938,7 +1049,7 @@ fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, them
         styled(theme, Role::Accent, running.to_string()),
         styled(theme, Role::Dim, " rodando · "),
         styled(theme, Role::Accent, ready.to_string()),
-        styled(theme, Role::Dim, " pronto · /theme · /agents · /buddy · /model · /quit"),
+        styled(theme, Role::Dim, " pronto · /help · /theme · /model · /resume · /quit"),
     ]);
     Paragraph::new(line).render(area, buf);
 }
@@ -1069,6 +1180,81 @@ mod tests {
         app.dispatch("/theme nope");
         assert_eq!(app.theme, "hacker");
         assert!(app.chat.iter().any(|m| m.text.contains("tema inexistente")));
+    }
+
+    #[test]
+    fn app_dispatch_help_lists_commands() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.dispatch("/help");
+        let joined: String = app.chat.iter().map(|m| m.text.clone()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("/model"));
+        assert!(joined.contains("/config"));
+        assert!(joined.contains("/resume"));
+    }
+
+    #[test]
+    fn app_dispatch_model_sets_master_model() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.dispatch("/model opus");
+        assert_eq!(app.master_model.as_deref(), Some("opus"));
+        assert_eq!(app.master, "claude/opus");
+    }
+
+    #[test]
+    fn app_dispatch_model_no_arg_shows_current() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        let before = app.master_model.clone();
+        app.dispatch("/model");
+        assert!(app.chat.iter().any(|m| m.text.contains("mestre:")));
+        assert_eq!(app.master_model, before); // no-arg não muda nada
+    }
+
+    #[test]
+    fn app_dispatch_config_shows_effective() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.dispatch("/config");
+        let joined: String = app.chat.iter().map(|m| m.text.clone()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("auto_copy"));
+        assert!(joined.contains("tema"));
+    }
+
+    #[test]
+    fn app_dispatch_unknown_still_errors() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.dispatch("/naoexiste");
+        assert!(app.chat.iter().any(|m| m.text.contains("comando desconhecido")));
+    }
+
+    #[test]
+    fn render_frame_headless_shows_wordmark_and_header() {
+        let config = Config::default();
+        let out = render_frame(&config, "/tmp/portfolio", 100, 32, false);
+        assert!(out.contains("regente")); // header
+        assert!(out.contains("/help")); // welcome/status hint
+    }
+
+    #[test]
+    fn render_frame_demo_shows_agents_and_chat() {
+        let config = Config::default();
+        let out = render_frame(&config, "/tmp/portfolio", 100, 32, true);
+        assert!(out.contains("refatora o modulo de auth"));
+        assert!(out.contains("a1"));
+        assert!(out.contains("running") || out.contains("done"));
+    }
+
+    #[test]
+    fn highlight_selection_reverses_cells_in_range() {
+        let area = Rect { x: 0, y: 0, width: 10, height: 3 };
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        highlight_selection(area, &mut buf, (2, 1), (5, 1));
+        assert!(buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED));
+        assert!(buf.cell((5, 1)).unwrap().modifier.contains(Modifier::REVERSED));
+        assert!(!buf.cell((0, 0)).unwrap().modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
