@@ -1,13 +1,15 @@
 ---
 name: reviewpr
-description: Use when a PR is ready and you want to consolidate what codex, opencode and gemini said about it, address their feedback, do a final review, escalate to Fable if in doubt, and merge to main. Triggers on "reviewpr", "revisa meu PR", "consolidar reviews", "juntar o que o codex/opencode/gemini falaram", "revisão final e merge".
+description: Use when a PR is ready and you want to consolidate what codex and opencode (and optionally gemini) said about it, address their feedback, do a final review, escalate to Fable if in doubt, and hand it back for human approval. Triggers on "reviewpr", "revisa meu PR", "consolidar reviews", "juntar o que o codex/opencode falaram", "revisão final". Never merges on its own — AGENTS.md forbids it.
 ---
 
 # PR Review Master
 
 ## Overview
 
-You are the **master reviewer**. Two assistants always review each PR — Codex and OpenCode (you run them locally). A third, Gemini (bot comments on GitHub), is **optional**: use it only when the bot actually left comments; skip silently otherwise. You gather what's available, decide what's real, fix it, review once more yourself, escalate to **Fable** only when genuinely unsure, then merge to main.
+You are the **master reviewer**. Two assistants always review each PR — Codex and OpenCode (you run them locally). A third, Gemini (bot comments on GitHub), is **optional**: use it only when the bot actually left comments; skip silently otherwise. You gather what's available, decide what's real, fix it, review once more yourself, escalate to **Fable** only when genuinely unsure, then **hand the PR back to the human for approval**.
+
+> **This repo never merges by agent.** `AGENTS.md` is explicit: the final output is always a PR for human approval — never `gh pr merge`. This skill stops at "PR is clean and ready"; the human merges.
 
 **Core principle:** external reviewers are advisors, not deciders. You adjudicate. Never blindly apply a suggestion and never dismiss one without a reason.
 
@@ -67,19 +69,18 @@ When a decision is genuinely split (reviewers disagree, or you're not confident 
 
 Don't escalate routine PRs. Fable is the last resort, not a step.
 
-### 7. Merge to main
-Only when: all blockers resolved, CI green, final review done.
-```bash
-gh pr merge <n> --squash --delete-branch
-```
-(Match the repo's merge mode — history here is squash.)
+### 7. Hand back for human approval — DO NOT merge
+When all blockers are resolved, CI is green, and your final review is done, the PR is *ready* — stop here. Post a short summary on the PR (findings, what you fixed, what you skipped and why) and tell the human it's ready to merge.
 
-## Red Flags — STOP, do not merge
+**Never run `gh pr merge`.** Per `AGENTS.md`, merging is a human decision. The skill's job ends at a clean, review-complete PR.
+
+## Red Flags — STOP
+- Merging the PR yourself — the human does that, always
 - Any unresolved **blocker**, even if a reviewer "seemed ok" with it
 - CI red or checks pending
 - You skipped a finding without recording why
 - You applied a suggestion you don't understand
-- Merging without doing your own step-5 read
+- Claiming "ready" without doing your own step-5 read
 
 ## Common Mistakes
 - **Rubber-stamping reviewers.** Three bots agreeing can all be wrong. Verify against code.
