@@ -99,6 +99,7 @@ const PALETTES: &[Palette] = &[
     },
 ];
 
+#[derive(Clone, Copy)]
 pub enum Role {
     Accent,
     Accent2,

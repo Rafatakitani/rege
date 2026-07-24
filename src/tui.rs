@@ -11,8 +11,8 @@ use crate::stream;
 use crate::theme::{self, Role};
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -690,7 +690,7 @@ pub fn render_frame(config: &Config, repo: &str, cols: u16, rows: u16, demo: boo
 pub fn run(config: &Config, repo: &str) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -699,7 +699,7 @@ pub fn run(config: &Config, repo: &str) -> Result<()> {
     let result = event_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
     result
 }
@@ -765,6 +765,13 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             KeyCode::Esc => break,
                             _ => {}
                         },
+                    }
+                }
+                Event::Paste(data) => {
+                    if matches!(app.mode, Mode::Normal) {
+                        // Single-line input: fold pasted newlines to spaces so a
+                        // multi-line paste can't fragment into separate submits.
+                        app.input.push_str(&data.replace(['\r', '\n'], " "));
                     }
                 }
                 Event::Mouse(m) => match m.kind {
@@ -974,31 +981,72 @@ fn draw_banner(area: Rect, buf: &mut ratatui::buffer::Buffer, theme: &str) {
 
 fn render_messages(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     let rows = area.height as usize;
-    let msgs: Vec<Line> = app
+    // Expand every message into its wrapped visual rows, then keep only the
+    // last `rows` — the height window is measured in display rows, not in
+    // messages, so multi-line/long-line output no longer collides or clips.
+    let mut lines: Vec<Line> = app
         .chat
         .iter()
-        .rev()
-        .take(rows)
-        .rev()
-        .map(|m| chat_line(theme, m))
+        .flat_map(|m| chat_lines(theme, m, area.width))
         .collect();
-    Paragraph::new(msgs).render(area, buf);
+    let start = lines.len().saturating_sub(rows);
+    let visible = lines.split_off(start);
+    Paragraph::new(visible).render(area, buf);
 }
 
-fn chat_line(theme: &str, m: &ChatMsg) -> Line<'static> {
-    match m.role {
-        ChatRole::User => Line::from(vec![
-            styled(theme, Role::Accent, "❯ "),
-            styled(theme, Role::Text, m.text.clone()),
-        ]),
-        ChatRole::Assistant => Line::from(vec![
-            styled(theme, Role::Accent, "● "),
-            styled(theme, Role::Text, m.text.clone()),
-        ]),
-        ChatRole::Tool => Line::from(styled(theme, Role::Dim, format!("  ⚙ {}", m.text))),
-        ChatRole::Info => Line::from(styled(theme, Role::Dim, m.text.clone())),
-        ChatRole::Error => Line::from(styled(theme, Role::Fail, m.text.clone())),
+/// One chat message → its display rows: the text is split on embedded `\n`
+/// and each segment hard-wrapped to `width`, with continuation rows indented
+/// under the role glyph so the left gutter stays aligned.
+fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
+    let (prefix, prefix_role, body_role) = match m.role {
+        ChatRole::User => ("❯ ", Role::Accent, Role::Text),
+        ChatRole::Assistant => ("● ", Role::Accent, Role::Text),
+        ChatRole::Tool => ("  ⚙ ", Role::Dim, Role::Dim),
+        ChatRole::Info => ("", Role::Dim, Role::Dim),
+        ChatRole::Error => ("", Role::Fail, Role::Fail),
+    };
+    let indent_cols = prefix.chars().count();
+    let budget = (width as usize).saturating_sub(indent_cols).max(1);
+    let indent = " ".repeat(indent_cols);
+    wrap_text(&m.text, budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            let gutter = if i == 0 { prefix.to_string() } else { indent.clone() };
+            if gutter.is_empty() {
+                Line::from(styled(theme, body_role, seg))
+            } else {
+                Line::from(vec![
+                    styled(theme, prefix_role, gutter),
+                    styled(theme, body_role, seg),
+                ])
+            }
+        })
+        .collect()
+}
+
+/// Splits on `\n`, then hard-wraps each line to `width` chars. Blank lines are
+/// preserved. Always returns at least one (possibly empty) segment.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for raw in text.split('\n') {
+        let chars: Vec<char> = raw.chars().collect();
+        if chars.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut i = 0;
+        while i < chars.len() {
+            let end = (i + width).min(chars.len());
+            out.push(chars[i..end].iter().collect());
+            i = end;
+        }
     }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
@@ -1155,6 +1203,25 @@ mod tests {
         assert_eq!(find_exit_code("hello\n__RG_EXIT_0__\n"), Some(0));
         assert_eq!(find_exit_code("hello\n__RG_EXIT_7__\n"), Some(7));
         assert_eq!(find_exit_code("no sentinel here"), None);
+    }
+
+    #[test]
+    fn wrap_text_splits_newlines_and_hard_wraps() {
+        // Embedded newlines become separate rows — no more jammed output.
+        assert_eq!(wrap_text("a\nb", 10), vec!["a", "b"]);
+        // Long line wraps at the width budget instead of being clipped.
+        assert_eq!(wrap_text("abcdef", 3), vec!["abc", "def"]);
+        // Blank input still yields one (empty) row.
+        assert_eq!(wrap_text("", 5), vec![String::new()]);
+        // Zero width is clamped to 1, never panics or loops forever.
+        assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn chat_lines_expands_multiline_message_to_multiple_rows() {
+        let m = ChatMsg { role: ChatRole::Tool, text: "line1\nline2".into() };
+        let lines = chat_lines("hacker", &m, 40);
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
