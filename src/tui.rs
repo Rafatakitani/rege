@@ -430,8 +430,11 @@ impl App {
                 self.session_id = Some(session_id);
             }
             stream::Event::Text(text) => self.push(ChatRole::Assistant, text),
-            stream::Event::Tool { name, .. } => self.push(ChatRole::Tool, name),
-            stream::Event::ToolResult(text) => self.push(ChatRole::Info, text),
+            stream::Event::Tool { name, input } => self.push(ChatRole::Tool, tool_running_label(&name, &input)),
+            // Result bodies (JSON, file lists, diffs) flood the master's log and
+            // carry no signal here — the worker already acted on them. Collapse
+            // to a marker; the running-line above shows what ran.
+            stream::Event::ToolResult(_) => self.push(ChatRole::Info, "ran command".to_string()),
             stream::Event::Done { cost } => {
                 let line = match cost {
                     Some(c) => format!("— ${c:.4}"),
@@ -1067,31 +1070,105 @@ fn draw_banner(area: Rect, buf: &mut ratatui::buffer::Buffer, theme: &str) {
 
 fn render_messages(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     let rows = area.height as usize;
-    let msgs: Vec<Line> = app
+    // Expand every message into its wrapped visual rows, then keep only the
+    // last `rows` — height is measured in display rows, not messages, so
+    // multi-line/long-line output neither collides nor clips.
+    let mut lines: Vec<Line> = app
         .chat
         .iter()
-        .rev()
-        .take(rows)
-        .rev()
-        .map(|m| chat_line(theme, m))
+        .flat_map(|m| chat_lines(theme, m, area.width))
         .collect();
-    Paragraph::new(msgs).render(area, buf);
+    let start = lines.len().saturating_sub(rows);
+    let visible = lines.split_off(start);
+    Paragraph::new(visible).render(area, buf);
 }
 
-fn chat_line(theme: &str, m: &ChatMsg) -> Line<'static> {
-    match m.role {
-        ChatRole::User => Line::from(vec![
-            styled(theme, Role::Accent, "❯ "),
-            styled(theme, Role::Text, m.text.clone()),
-        ]),
-        ChatRole::Assistant => Line::from(vec![
-            styled(theme, Role::Accent, "● "),
-            styled(theme, Role::Text, m.text.clone()),
-        ]),
-        ChatRole::Tool => Line::from(styled(theme, Role::Dim, format!("  ⚙ {}", m.text))),
-        ChatRole::Info => Line::from(styled(theme, Role::Dim, m.text.clone())),
-        ChatRole::Error => Line::from(styled(theme, Role::Fail, m.text.clone())),
+/// Compact one-line label for a running tool call. For a shell command it
+/// surfaces just the opening of the command ("running bash gh pr view 268…");
+/// for anything else, the tool name alone. Never dumps the full input.
+fn tool_running_label(name: &str, input: &str) -> String {
+    let low = name.to_ascii_lowercase();
+    let detail = serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|v| {
+            v.get("command")
+                .or_else(|| v.get("description"))
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+        });
+    match detail {
+        Some(cmd) => format!("running {low} {}", first_bit(&cmd, 50)),
+        None => format!("running {low}"),
     }
+}
+
+/// First line of `s`, trimmed to `max` chars, with an ellipsis if anything was
+/// dropped (either a newline or the length cap).
+fn first_bit(s: &str, max: usize) -> String {
+    let line = s.trim_start();
+    let first = line.lines().next().unwrap_or("");
+    let truncated: String = first.chars().take(max).collect();
+    let clipped = truncated.chars().count() < first.chars().count() || first.len() < line.len();
+    if clipped {
+        format!("{}…", truncated.trim_end())
+    } else {
+        truncated
+    }
+}
+
+/// One chat message → its display rows: text is split on embedded `\n` and each
+/// segment hard-wrapped to `width`, with continuation rows indented under the
+/// role glyph so the left gutter stays aligned.
+fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
+    let (prefix, prefix_role, body_role) = match m.role {
+        ChatRole::User => ("❯ ", Role::Accent, Role::Text),
+        ChatRole::Assistant => ("● ", Role::Accent, Role::Text),
+        ChatRole::Tool => ("  ⚙ ", Role::Dim, Role::Dim),
+        ChatRole::Info => ("", Role::Dim, Role::Dim),
+        ChatRole::Error => ("", Role::Fail, Role::Fail),
+    };
+    let indent_cols = prefix.chars().count();
+    let budget = (width as usize).saturating_sub(indent_cols).max(1);
+    let indent = " ".repeat(indent_cols);
+    wrap_text(&m.text, budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            let gutter = if i == 0 { prefix.to_string() } else { indent.clone() };
+            if gutter.is_empty() {
+                Line::from(styled(theme, body_role, seg))
+            } else {
+                Line::from(vec![
+                    styled(theme, prefix_role, gutter),
+                    styled(theme, body_role, seg),
+                ])
+            }
+        })
+        .collect()
+}
+
+/// Splits on `\n`, then hard-wraps each line to `width` chars. Blank lines are
+/// preserved. Always returns at least one (possibly empty) segment.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for raw in text.split('\n') {
+        let chars: Vec<char> = raw.chars().collect();
+        if chars.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut i = 0;
+        while i < chars.len() {
+            let end = (i + width).min(chars.len());
+            out.push(chars[i..end].iter().collect());
+            i = end;
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
@@ -1322,6 +1399,46 @@ mod tests {
         assert_eq!(find_exit_code("hello\n__RG_EXIT_0__\n"), Some(0));
         assert_eq!(find_exit_code("hello\n__RG_EXIT_7__\n"), Some(7));
         assert_eq!(find_exit_code("no sentinel here"), None);
+    }
+
+    #[test]
+    fn tool_label_surfaces_command_opening_only() {
+        // Short command: shown in full.
+        let short = r#"{"command":"gh pr view 268"}"#;
+        assert_eq!(tool_running_label("Bash", short), "running bash gh pr view 268");
+        // Long command: clipped to the opening with an ellipsis.
+        let long = r#"{"command":"gh pr view 268 --json additions,body,files,commits,reviews"}"#;
+        assert_eq!(tool_running_label("Bash", long), "running bash gh pr view 268 --json additions,body,files,commits…");
+        // Non-bash tool with no command → name only.
+        assert_eq!(tool_running_label("mcp__rege__consult", "{}"), "running mcp__rege__consult");
+        // Garbage input never panics.
+        assert_eq!(tool_running_label("Bash", "not json"), "running bash");
+    }
+
+    #[test]
+    fn first_bit_clips_multiline_and_long() {
+        assert_eq!(first_bit("short", 50), "short");
+        assert_eq!(first_bit("line1\nline2", 50), "line1…");
+        assert_eq!(first_bit("abcdefghij", 4), "abcd…");
+    }
+
+    #[test]
+    fn wrap_text_splits_newlines_and_hard_wraps() {
+        // Embedded newlines become separate rows — no more jammed output.
+        assert_eq!(wrap_text("a\nb", 10), vec!["a", "b"]);
+        // Long line wraps at the width budget instead of being clipped.
+        assert_eq!(wrap_text("abcdef", 3), vec!["abc", "def"]);
+        // Blank input still yields one (empty) row.
+        assert_eq!(wrap_text("", 5), vec![String::new()]);
+        // Zero width is clamped to 1, never panics or loops forever.
+        assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn chat_lines_expands_multiline_message_to_multiple_rows() {
+        let m = ChatMsg { role: ChatRole::Tool, text: "line1\nline2".into() };
+        let lines = chat_lines("hacker", &m, 40);
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
