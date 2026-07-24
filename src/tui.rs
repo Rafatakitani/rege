@@ -11,8 +11,8 @@ use crate::stream;
 use crate::theme::{self, Role};
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -116,6 +116,8 @@ struct App {
     repo: String,
     chat: Vec<ChatMsg>,
     input: String,
+    input_cursor: usize,
+    input_rect: Rect,
     agents: Vec<AgentRow>,
     logdir: PathBuf,
     master_session: String,
@@ -154,6 +156,8 @@ impl App {
                 text: "Rege pronto. Digite uma tarefa. /help lista comandos, /quit sai.".into(),
             }],
             input: String::new(),
+            input_cursor: 0,
+            input_rect: Rect::default(),
             agents: Vec::new(),
             logdir: std::env::temp_dir().join("rege-logs"),
             master_session: "rege-master".into(),
@@ -254,7 +258,59 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    fn input_insert(&mut self, c: char) {
+        let byte_idx = self.input.char_indices().nth(self.input_cursor).map(|(i, _)| i).unwrap_or(self.input.len());
+        self.input.insert(byte_idx, c);
+        self.input_cursor += 1;
+    }
+
+    fn input_insert_str(&mut self, text: &str) {
+        let byte_idx = self.input.char_indices().nth(self.input_cursor).map(|(i, _)| i).unwrap_or(self.input.len());
+        self.input.insert_str(byte_idx, text);
+        self.input_cursor += text.chars().count();
+    }
+
+    fn input_backspace(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let byte_idx = self.input.char_indices().nth(self.input_cursor - 1).map(|(i, _)| i).unwrap();
+        self.input.remove(byte_idx);
+        self.input_cursor -= 1;
+    }
+
+    fn input_delete(&mut self) {
+        if let Some((byte_idx, _)) = self.input.char_indices().nth(self.input_cursor) {
+            self.input.remove(byte_idx);
+        }
+    }
+
+    fn input_left(&mut self) {
+        self.input_cursor = self.input_cursor.saturating_sub(1);
+    }
+
+    fn input_right(&mut self) {
+        let len = self.input.chars().count();
+        self.input_cursor = (self.input_cursor + 1).min(len);
+    }
+
+    fn input_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    fn input_end(&mut self) {
+        self.input_cursor = self.input.chars().count();
+    }
+
     fn mouse_down(&mut self, col: u16, row: u16) {
+        if in_rect(self.input_rect, col, row) {
+            let prefix_width: u16 = 2; // "❯ "
+            let inner_x = self.input_rect.x + 1; // border
+            let text_x = inner_x + prefix_width;
+            let clicked = if col >= text_x { (col - text_x) as usize } else { 0 };
+            self.input_cursor = clicked.min(self.input.chars().count());
+            return;
+        }
         self.selection_start = Some((col, row));
         self.selection_end = Some((col, row));
     }
@@ -266,6 +322,9 @@ impl App {
     }
 
     fn mouse_up(&mut self, col: u16, row: u16) {
+        if self.selection_start.is_none() {
+            return;
+        }
         self.selection_end = Some((col, row));
         self.finalize_selection();
     }
@@ -288,11 +347,17 @@ impl App {
     fn submit(&mut self) {
         let line = self.input.trim().to_string();
         self.input.clear();
+        self.input_cursor = 0;
         if line.is_empty() {
             return;
         }
-        if line.starts_with('/') {
+        if line.starts_with('/') && is_known_command(&line) {
             self.dispatch(&line);
+            return;
+        }
+        if line.starts_with('/') {
+            let cmd = line.split_whitespace().next().unwrap_or(&line).to_string();
+            self.push(ChatRole::Error, format!("comando desconhecido: {cmd}"));
             return;
         }
         if self.pending_title.is_none() {
@@ -456,6 +521,18 @@ impl App {
             }
         }
     }
+}
+
+const KNOWN_COMMANDS: &[&str] =
+    &["/quit", "/q", "/help", "/?", "/model", "/config", "/theme", "/resume", "/agents", "/buddy"];
+
+fn is_known_command(line: &str) -> bool {
+    let cmd = line.split_whitespace().next().unwrap_or(line);
+    KNOWN_COMMANDS.contains(&cmd)
+}
+
+fn in_rect(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
 /// Truncates a session title candidate to ~60 chars, appending "..." when cut.
@@ -679,7 +756,7 @@ pub fn render_frame(config: &Config, repo: &str, cols: u16, rows: u16, demo: boo
     let mut out = Vec::new();
     terminal
         .draw(|f| {
-            draw(f.area(), f.buffer_mut(), &app);
+            draw(f.area(), f.buffer_mut(), &mut app);
             out = capture_row_text(f.buffer_mut());
         })
         .expect("draw");
@@ -690,7 +767,7 @@ pub fn render_frame(config: &Config, repo: &str, cols: u16, rows: u16, demo: boo
 pub fn run(config: &Config, repo: &str) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -699,7 +776,7 @@ pub fn run(config: &Config, repo: &str) -> Result<()> {
     let result = event_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
     result
 }
@@ -751,10 +828,13 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             _ => {}
                         },
                         Mode::Normal => match key.code {
-                            KeyCode::Char(c) => app.input.push(c),
-                            KeyCode::Backspace => {
-                                app.input.pop();
-                            }
+                            KeyCode::Char(c) => app.input_insert(c),
+                            KeyCode::Backspace => app.input_backspace(),
+                            KeyCode::Delete => app.input_delete(),
+                            KeyCode::Left => app.input_left(),
+                            KeyCode::Right => app.input_right(),
+                            KeyCode::Home => app.input_home(),
+                            KeyCode::End => app.input_end(),
                             KeyCode::Enter => {
                                 let line = app.input.trim().to_string();
                                 if matches!(line.as_str(), "/quit" | "/q" | "quit" | "exit" | ":q") {
@@ -773,6 +853,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                     MouseEventKind::Up(MouseButton::Left) => app.mouse_up(m.column, m.row),
                     _ => {}
                 },
+                Event::Paste(text) => app.input_insert_str(&text),
                 _ => {}
             }
         }
@@ -816,16 +897,19 @@ fn rounded_block(theme: &str, title: &str, role: Role) -> Block<'static> {
         .title(Span::styled(title.to_string(), Style::default().fg(color)))
 }
 
-fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-    let theme = app.active_theme();
+fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
+    let theme = app.active_theme().to_string();
+    let theme = theme.as_str();
+    let input_height = input_area_height(&app.input, area.width);
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(6),
-        Constraint::Length(3),
+        Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .split(area);
+    app.input_rect = chunks[3];
 
     draw_header(chunks[0], buf, app, theme);
     draw_chat(chunks[1], buf, app, theme);
@@ -1023,16 +1107,43 @@ fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: 
     Paragraph::new(lines).render(inner, buf);
 }
 
+/// Lines the input text wraps to at `width` (prefix "❯ " + border eat 4 cols),
+/// plus 2 border rows, clamped to a sane range so the box grows without
+/// swallowing the whole screen.
+fn input_area_height(input: &str, width: u16) -> u16 {
+    let text_width = width.saturating_sub(4).max(1) as usize;
+    let char_count = input.chars().count().max(1);
+    let lines = ((char_count + text_width - 1) / text_width).max(1) as u16;
+    (lines + 2).clamp(3, 8)
+}
+
 fn draw_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     let block = rounded_block(theme, "", Role::Dim);
     let inner = block.inner(area);
     block.render(area, buf);
+
+    let chars: Vec<char> = app.input.chars().collect();
+    let cursor = app.input_cursor.min(chars.len());
+    let before: String = chars[..cursor].iter().collect();
+    let (cursor_span, after) = if cursor < chars.len() {
+        let under = chars[cursor].to_string();
+        let after: String = chars[cursor + 1..].iter().collect();
+        let span = Span::styled(
+            under,
+            Style::default().fg(rgb(theme::color(theme, Role::Text))).add_modifier(Modifier::REVERSED),
+        );
+        (span, after)
+    } else {
+        (styled(theme, Role::Neon, "█"), String::new())
+    };
+
     let line = Line::from(vec![
         styled(theme, Role::Accent, "❯ "),
-        styled(theme, Role::Text, app.input.clone()),
-        styled(theme, Role::Neon, "█"),
+        styled(theme, Role::Text, before),
+        cursor_span,
+        styled(theme, Role::Text, after),
     ]);
-    Paragraph::new(line).render(inner, buf);
+    Paragraph::new(line).wrap(ratatui::widgets::Wrap { trim: false }).render(inner, buf);
 }
 
 fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
