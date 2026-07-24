@@ -7,7 +7,7 @@ description: Use when a PR is ready and you want to consolidate what codex, open
 
 ## Overview
 
-You are the **master reviewer**. Three assistants review each PR — Gemini (bot comments on GitHub), Codex and OpenCode (you run them locally). You gather all three, decide what's real, fix it, review once more yourself, escalate to **Fable** only when genuinely unsure, then merge to main.
+You are the **master reviewer**. Two assistants always review each PR — Codex and OpenCode (you run them locally). A third, Gemini (bot comments on GitHub), is **optional**: use it only when the bot actually left comments; skip silently otherwise. You gather what's available, decide what's real, fix it, review once more yourself, escalate to **Fable** only when genuinely unsure, then merge to main.
 
 **Core principle:** external reviewers are advisors, not deciders. You adjudicate. Never blindly apply a suggestion and never dismiss one without a reason.
 
@@ -21,22 +21,24 @@ gh pr view --json number,title,url,mergeStateStatus,statusCheckRollup 2>/dev/nul
 ```
 Confirm branch + base (usually `main`). Check CI status now — red CI blocks merge later.
 
-### 2. Gather the three reviews (parallel)
+### 2. Gather the reviews (parallel)
 
-**Gemini** — bot comments already on GitHub:
-```bash
-gh pr view <n> --comments
-gh api repos/{owner}/{repo}/pulls/<n>/comments   # inline review comments
-```
+Run **after** CI's final check is green — no point reviewing a PR that doesn't build.
 
-**Codex** — run locally on the PR diff:
+**Codex** (always) — run locally on the PR diff:
 ```bash
 codex review --base main
 ```
 
-**OpenCode** — run locally:
+**OpenCode** (always) — run locally:
 ```bash
 opencode run "Review the diff of this branch against main. List bugs, risks, and nits. Be terse."
+```
+
+**Gemini** (optional) — only if a bot left comments; skip silently if none:
+```bash
+gh pr view <n> --comments
+gh api repos/{owner}/{repo}/pulls/<n>/comments   # inline review comments
 ```
 
 ### 3. Triage — you decide
