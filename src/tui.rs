@@ -116,6 +116,9 @@ struct App {
     repo: String,
     chat: Vec<ChatMsg>,
     input: String,
+    history: Vec<String>,
+    history_cursor: Option<usize>,
+    history_draft: String,
     agents: Vec<AgentRow>,
     logdir: PathBuf,
     master_session: String,
@@ -154,6 +157,9 @@ impl App {
                 text: "Rege pronto. Digite uma tarefa. /help lista comandos, /quit sai.".into(),
             }],
             input: String::new(),
+            history: Vec::new(),
+            history_cursor: None,
+            history_draft: String::new(),
             agents: Vec::new(),
             logdir: std::env::temp_dir().join("rege-logs"),
             master_session: "rege-master".into(),
@@ -254,6 +260,38 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    /// Steps backward through previously submitted messages, like shell history.
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_cursor {
+            None => {
+                self.history_draft = self.input.clone();
+                self.history.len() - 1
+            }
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        self.history_cursor = Some(next);
+        self.input = self.history[next].clone();
+    }
+
+    /// Steps forward through history, restoring the in-progress draft past the newest entry.
+    fn history_next(&mut self) {
+        match self.history_cursor {
+            None => {}
+            Some(i) if i + 1 < self.history.len() => {
+                self.history_cursor = Some(i + 1);
+                self.input = self.history[i + 1].clone();
+            }
+            Some(_) => {
+                self.history_cursor = None;
+                self.input = self.history_draft.clone();
+            }
+        }
+    }
+
     fn mouse_down(&mut self, col: u16, row: u16) {
         self.selection_start = Some((col, row));
         self.selection_end = Some((col, row));
@@ -291,6 +329,11 @@ impl App {
         if line.is_empty() {
             return;
         }
+        if self.history.last().map(|s| s.as_str()) != Some(line.as_str()) {
+            self.history.push(line.clone());
+        }
+        self.history_cursor = None;
+        self.history_draft.clear();
         if line.starts_with('/') {
             self.dispatch(&line);
             return;
@@ -762,6 +805,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                                 }
                                 app.submit();
                             }
+                            KeyCode::Up => app.history_prev(),
+                            KeyCode::Down => app.history_next(),
                             KeyCode::Esc => break,
                             _ => {}
                         },
