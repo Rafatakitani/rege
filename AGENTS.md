@@ -68,8 +68,14 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 
 ## Trabalhando NESTE repositório (rege em si)
 
-- Rust. `cargo test` (104 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- Rust. `cargo test` (123 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
 - Módulos em `src/`: `config`, `command`, `worktree`, `tmux`, `agent`, `engine`,
-  `session`, `mcp`, `theme`, `tui`, `buddy`, `stream`, `driver`, `sessions`, `playbook`.
+  `session`, `mcp`, `theme`, `tui`, `buddy`, `stream`, `driver`, `sessions`, `playbook`,
+  `rtk`.
+- **`rtk`**: se o binário [`rtk`](https://github.com/rtk-ai/rtk) estiver no `PATH`, o
+  diff que vai pro contexto do mestre (`diff_agent`/`review`) passa por `rtk git diff`
+  (-75% de tokens). O `.patch` do `open_pr` e o git plumbing continuam crus — diff
+  condensado não aplica. Desliga com `REGE_RTK=0`. Regra ao mexer aqui: **só comprima o
+  que um LLM vai ler**; o que é consumido por máquina fica cru.
 - Desenho completo: `docs/superpowers/specs/2026-07-23-rege-design.md`.
 - Preserve a atribuição MIT do `/buddy` (port de ramarivera/claude-buddy) no topo de `src/buddy.rs`.
