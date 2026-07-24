@@ -46,6 +46,10 @@ impl Worktree {
     pub fn create(&self) -> Result<PathBuf> {
         let root = self.path.parent().ok_or_else(|| anyhow!("path sem parent"))?;
         std::fs::create_dir_all(root)?;
+        // Clear metadata left by a worktree whose directory was deleted out from
+        // under git (e.g. a crashed run under /tmp) — otherwise `worktree add`
+        // aborts with "branch already used by worktree at <gone path>".
+        let _ = self.git(&["worktree", "prune"]);
         let base = match &self.base {
             Some(b) => b.clone(),
             None => self.current_head()?,

@@ -36,7 +36,44 @@ impl<'a> Session<'a> {
         let name = format!("a{}", self.counter);
         let idx = self.engine.spawn(&name, cli, task, model, role, None, command)?;
         let agent = &self.engine.agents[idx];
-        Ok(json!({ "agent_id": name, "branch": agent.branch(), "state": state_str(agent.state()) }))
+        let out = json!({ "agent_id": name, "branch": agent.branch(), "state": state_str(agent.state()) });
+        self.persist();
+        Ok(out)
+    }
+
+    /// Snapshot the roster to `.rege-runs/run-<id>.json` so a crashed master's
+    /// agents (their branches, worktrees, tmux sessions) stay discoverable and
+    /// cleanable instead of vanishing with the in-memory engine.
+    fn persist(&self) {
+        let agents: Vec<Value> = self
+            .engine
+            .agents
+            .iter()
+            .map(|a| {
+                json!({
+                    "agent_id": a.name,
+                    "cli": a.cli,
+                    "model": a.model,
+                    "role": a.role,
+                    "branch": a.worktree.branch,
+                    "worktree": a.worktree.path.to_string_lossy(),
+                    "tmux": a.tmux.session,
+                    "state": state_str(a.state()),
+                })
+            })
+            .collect();
+        let manifest = json!({
+            "run": crate::agent::run_id(),
+            "repo": self.repo.to_string_lossy(),
+            "agents": agents,
+        });
+        let dir = self.repo.join(".rege-runs");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let path = dir.join(format!("run-{}.json", crate::agent::run_id()));
+            if let Ok(bytes) = serde_json::to_vec_pretty(&manifest) {
+                let _ = std::fs::write(path, bytes);
+            }
+        }
     }
 
     pub fn list_agents(&mut self) -> Value {
@@ -70,13 +107,15 @@ impl<'a> Session<'a> {
     /// Block until the agent finishes (or timeout), then commit its work.
     pub fn wait_agent(&mut self, agent_id: &str, timeout: Option<u64>) -> Value {
         let timeout = timeout.unwrap_or(300);
-        self.with_agent_mut(agent_id, |a| {
+        let out = self.with_agent_mut(agent_id, |a| {
             let state = a.wait(timeout);
             if state == State::Done {
                 a.commit(None);
             }
             json!({ "agent_id": agent_id, "state": state_str(state) })
-        })
+        });
+        self.persist();
+        out
     }
 
     pub fn read_output(&self, agent_id: &str) -> Value {
@@ -91,10 +130,12 @@ impl<'a> Session<'a> {
     }
 
     pub fn kill_agent(&mut self, agent_id: &str) -> Value {
-        self.with_agent_mut(agent_id, |a| {
+        let out = self.with_agent_mut(agent_id, |a| {
             let killed = a.tmux.kill().is_ok();
             json!({ "agent_id": agent_id, "killed": killed })
-        })
+        });
+        self.persist();
+        out
     }
 
     pub fn diff_agent(&mut self, agent_id: &str) -> Value {
@@ -244,6 +285,12 @@ fn write_patch(repo: &Path, branch: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
+
+    // `run_id()` is process-global, so two tests that both spawn agent "a1"
+    // would fight over the same `rege-<run>-a1` tmux/worktree. Serialize them
+    // (a real master never reuses ids within a run; only the test harness does).
+    static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
     fn init_repo(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("rege-session-test-{}-{}", std::process::id(), name));
@@ -332,6 +379,7 @@ mod tests {
     #[test]
     fn spawn_agent_lifecycle_ids_wait_and_diff() {
         skip_if_no_tmux!();
+        let _guard = SPAWN_LOCK.lock().unwrap();
         let repo = init_repo("spawn-lifecycle");
         let config = Config::default();
         let mut session = Session::new(&repo, &config);
@@ -349,6 +397,25 @@ mod tests {
         assert_eq!(status["state"], json!("done"));
         let diff = session.diff_agent(&id);
         assert!(diff["diff"].as_str().unwrap().contains("out.txt"));
+        session.engine.shutdown();
+    }
+
+    #[test]
+    fn spawn_writes_run_manifest_with_scoped_branch() {
+        skip_if_no_tmux!();
+        let _guard = SPAWN_LOCK.lock().unwrap();
+        let repo = init_repo("manifest");
+        let config = Config::default();
+        let mut session = Session::new(&repo, &config);
+        session
+            .spawn_agent("claude", "t", None, None, Some("exit 0".to_string()))
+            .unwrap();
+        let path = repo.join(".rege-runs").join(format!("run-{}.json", crate::agent::run_id()));
+        assert!(path.exists(), "manifest nao escrito");
+        let v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["agents"][0]["agent_id"], json!("a1"));
+        let branch = v["agents"][0]["branch"].as_str().unwrap();
+        assert!(branch.starts_with("rege/") && branch.ends_with("-a1"), "branch nao scopado: {branch}");
         session.engine.shutdown();
     }
 

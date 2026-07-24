@@ -7,6 +7,21 @@ use crate::tmux::Tmux;
 use crate::worktree::Worktree;
 use anyhow::Result;
 use std::path::Path;
+use std::sync::OnceLock;
+
+/// A token unique to this master process, computed once. Every agent's tmux
+/// session, worktree path and branch are namespaced with it, so leftovers from
+/// a crashed run can never collide with a fresh one (the bug that stalled a1/a2).
+pub fn run_id() -> &'static str {
+    static RUN: OnceLock<String> = OnceLock::new();
+    RUN.get_or_init(|| {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("{:x}{:x}", std::process::id(), secs & 0xff_ffff)
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -47,8 +62,11 @@ impl Agent {
             .and_then(|c| c.sandbox.get("yolo").copied())
             .unwrap_or(true);
         let prefix = config.and_then(|c| c.pr.get("branch_prefix").map(String::as_str));
-        let worktree = Worktree::new(repo, name, prefix, base, None)?;
-        let tmux = Tmux::new(&format!("rege-{name}"), None)?;
+        // Namespace the isolation resources with the run token; `name` (a1, a2…)
+        // stays the user-facing id, but tmux/worktree/branch get a unique scope.
+        let scoped = format!("{}-{}", run_id(), name);
+        let worktree = Worktree::new(repo, &scoped, prefix, base, None)?;
+        let tmux = Tmux::new(&format!("rege-{scoped}"), None)?;
         Ok(Agent {
             name: name.to_string(),
             cli: cli.to_string(),
@@ -142,7 +160,7 @@ impl Agent {
     /// Swap in a fresh tmux session and restart the same command (used on retry).
     pub fn restart(&mut self) -> Result<()> {
         let cmd = self.build_command()?;
-        let tmux = Tmux::new(&format!("rege-{}-retry", self.name), None)?;
+        let tmux = Tmux::new(&format!("rege-{}-retry", self.worktree.name), None)?;
         tmux.start(&cmd, &self.worktree.path)?;
         self.tmux = tmux;
         self.state = State::Running;
@@ -221,7 +239,10 @@ mod tests {
         let agent = Agent::new(&repo, "a1", "claude", "faz X", None, None, None, None, None).unwrap();
         assert_eq!(agent.state(), State::Pending);
         assert_eq!(agent.role, "worker");
-        assert_eq!(agent.worktree.branch, "rege/a1");
+        // Branch is run-scoped (rege/<run>-a1) so crashed runs never collide.
+        assert!(agent.worktree.branch.starts_with("rege/"), "got {}", agent.worktree.branch);
+        assert!(agent.worktree.branch.ends_with("-a1"), "got {}", agent.worktree.branch);
+        assert!(agent.tmux.session.starts_with("rege-") && agent.tmux.session.ends_with("-a1"));
     }
 
     #[test]
