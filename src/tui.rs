@@ -264,9 +264,13 @@ impl App {
         self.input_cursor += 1;
     }
 
+    /// Inserts pasted text as a single logical line: `input` has no real
+    /// multi-line support (only visual word-wrap), so embedded newlines are
+    /// flattened to spaces instead of becoming raw control glyphs.
     fn input_insert_str(&mut self, text: &str) {
+        let text = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
         let byte_idx = self.input.char_indices().nth(self.input_cursor).map(|(i, _)| i).unwrap_or(self.input.len());
-        self.input.insert_str(byte_idx, text);
+        self.input.insert_str(byte_idx, &text);
         self.input_cursor += text.chars().count();
     }
 
@@ -304,10 +308,15 @@ impl App {
 
     fn mouse_down(&mut self, col: u16, row: u16) {
         if in_rect(self.input_rect, col, row) {
-            let prefix_width: u16 = 2; // "❯ "
-            let inner_x = self.input_rect.x + 1; // border
-            let text_x = inner_x + prefix_width;
-            let clicked = if col >= text_x { (col - text_x) as usize } else { 0 };
+            let inner_x = self.input_rect.x + 1; // left border
+            let inner_y = self.input_rect.y + 1; // top border
+            let text: Vec<char> = format!("❯ {}", self.input).chars().collect();
+            let width = self.input_rect.width.saturating_sub(2).max(1) as usize;
+            let ranges = wrap_char_ranges(&text, width);
+            let line_idx = (row.saturating_sub(inner_y) as usize).min(ranges.len() - 1);
+            let (start, end) = ranges[line_idx];
+            let col_offset = (col.saturating_sub(inner_x) as usize).min(end - start);
+            let clicked = (start + col_offset).saturating_sub(2); // drop "❯ " prefix
             self.input_cursor = clicked.min(self.input.chars().count());
             return;
         }
@@ -1107,14 +1116,61 @@ fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: 
     Paragraph::new(lines).render(inner, buf);
 }
 
-/// Lines the input text wraps to at `width` (prefix "❯ " + border eat 4 cols),
-/// plus 2 border rows, clamped to a sane range so the box grows without
-/// swallowing the whole screen.
+/// Lines the input text wraps to at `width`, plus 2 border rows, clamped to a
+/// sane range so the box grows without swallowing the whole screen. Uses
+/// ratatui's own word-wrap line count (same algorithm `draw_input` renders
+/// with) so this matches the real wrapped height, not a char-count estimate.
 fn input_area_height(input: &str, width: u16) -> u16 {
-    let text_width = width.saturating_sub(4).max(1) as usize;
-    let char_count = input.chars().count().max(1);
-    let lines = ((char_count + text_width - 1) / text_width).max(1) as u16;
-    (lines + 2).clamp(3, 8)
+    let inner_width = width.saturating_sub(2).max(1);
+    let text = format!("❯ {input}");
+    let lines = Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }).line_count(inner_width) as u16;
+    (lines.max(1) + 2).clamp(3, 8)
+}
+
+/// Word-wraps `text` at `width` columns, returning `(start, end)` char-index
+/// ranges per visual line. Approximates ratatui's `Wrap { trim: false }`
+/// composer (which is private) closely enough to map a click's row back to
+/// the right line — exact mid-word placement isn't required.
+fn wrap_char_ranges(text: &[char], width: usize) -> Vec<(usize, usize)> {
+    let width = width.max(1);
+    if text.is_empty() {
+        return vec![(0, 0)];
+    }
+    let mut words: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        if text[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < text.len() && !text[i].is_whitespace() {
+            i += 1;
+        }
+        words.push((start, i));
+    }
+    if words.is_empty() {
+        return vec![(0, text.len())];
+    }
+    let mut lines = Vec::new();
+    let mut line_start = 0usize;
+    let mut line_len = 0usize;
+    let mut prev_word_end = 0usize;
+    for (idx, &(wstart, wend)) in words.iter().enumerate() {
+        let word_len = wend - wstart;
+        let sep = if idx == 0 { wstart - line_start } else { wstart - prev_word_end };
+        let projected = line_len + sep + word_len;
+        if line_len > 0 && projected > width {
+            lines.push((line_start, prev_word_end));
+            line_start = wstart;
+            line_len = word_len;
+        } else {
+            line_len = projected;
+        }
+        prev_word_end = wend;
+    }
+    lines.push((line_start, text.len()));
+    lines
 }
 
 fn draw_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
