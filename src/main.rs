@@ -9,6 +9,7 @@ mod driver;
 mod engine;
 mod mcp;
 mod playbook;
+mod rtk;
 mod session;
 mod sessions;
 mod stream;

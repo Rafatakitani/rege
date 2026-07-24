@@ -1,6 +1,7 @@
 //! One isolated git worktree + branch per agent. Agents edit here in parallel
 //! with zero file-level races; the reviewer diffs each branch.
 
+use crate::rtk;
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -72,11 +73,18 @@ impl Worktree {
     }
 
     /// Diff of this branch against the base ref it forked from.
+    ///
+    /// This one feeds the master's context (`diff_agent`, `review`), so it goes
+    /// through `rtk` when available — condensed, ~75% fewer tokens. The raw diff
+    /// used to write `.patch` files lives in `session::write_patch` and must stay
+    /// raw to remain appliable.
     pub fn diff(&self) -> Result<String> {
         let base = self.base.clone().unwrap_or_else(|| "HEAD".to_string());
         let range = format!("{}...{}", base, self.branch);
-        let (out, _) = self.git_capture(&["diff", &range])?;
-        Ok(out)
+        let repo = self.repo.to_str().ok_or_else(|| anyhow!("path invalido"))?;
+        let argv = rtk::git_argv(&["-C", repo, "diff", &range]);
+        let output = Command::new(&argv[0]).args(&argv[1..]).output()?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
     pub fn remove(&self, force: bool) -> Result<()> {

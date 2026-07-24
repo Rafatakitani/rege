@@ -34,6 +34,8 @@ que você controla e entende o que está sendo pedido.** Não é uma sandbox de 
 - Pelo menos um CLI de IA instalado e autenticado. **Hoje o mestre só está 100% wired
   para `claude`**; `codex`/`gemini`/`opencode` funcionam como workers em best-effort.
 - `gh` (opcional) autenticado, pra abrir PRs — sem ele, cai pra `.patch`.
+- [`rtk`](https://github.com/rtk-ai/rtk) (opcional) — comprime o output que entra no
+  contexto do mestre. Ver [Economia de tokens](#economia-de-tokens-rtk).
 
 ## Instalação
 
@@ -89,6 +91,39 @@ ui:
 - **Difícil** — redundância & juiz: vários fazem o mesmo → merge sintético → loop de
   conserto (caça-bug, roda os testes se existirem, máx 3 rodadas).
 
+## Economia de tokens (`rtk`)
+
+[`rtk`](https://github.com/rtk-ai/rtk) é um proxy de CLI que filtra o output de comandos
+antes dele virar contexto de LLM (-60% a -90% de tokens). O `rege` usa se estiver no
+`PATH`, sem configuração:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g            # hook do Claude Code (workers também ganham)
+rtk init -g --opencode
+rtk init -g --gemini --auto-patch
+rtk init -g --codex
+```
+
+O que o `rege` roteia por `rtk`:
+
+| caminho | vira | por quê |
+|---------|------|---------|
+| `diff_agent` / `review` (diff da branch do worker) | `rtk git diff` | é o maior bloco que entra no contexto do mestre |
+| output dos workers (`git status`, testes, `ls`…) | hook do próprio CLI | `rtk init -g` reescreve os comandos Bash deles |
+
+O que **fica cru** de propósito: o `.patch` do `open_pr` (diff condensado não aplica) e
+o git plumbing interno (`rev-parse`, `worktree`, `commit`) — ninguém lê aquilo.
+
+Pra comprimir também o `run_tests`, ponha o `rtk` no seu comando de verify:
+
+```yaml
+verify:
+  command: rtk cargo test   # em vez de: cargo test
+```
+
+Desligar: `REGE_RTK=0 rege …` (e `REGE_RTK=1` força, mesmo sem detectar o binário).
+
 ## Para IAs / agentes
 
 Se você é um agente de IA (Claude, Codex, Gemini…) operando este repo ou usando o
@@ -99,7 +134,7 @@ worktree, nunca fazer merge sozinho, sempre abrir PR).
 ## Desenvolvimento
 
 ```bash
-cargo test    # 104 testes
+cargo test    # 123 testes
 cargo fmt && cargo clippy
 ```
 
