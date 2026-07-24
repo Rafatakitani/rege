@@ -38,9 +38,12 @@ que você controla e entende o que está sendo pedido.** Não é uma sandbox de 
 ## Instalação
 
 ```bash
-git clone <este-repo> rege && cd rege
+git clone https://github.com/Rafatakitani/rege.git
+cd rege
 cargo install --path .
 ```
+
+Isso instala o binário `rege` em `~/.cargo/bin` (garanta que está no seu `PATH`).
 
 ## Uso
 
@@ -85,6 +88,13 @@ ui:
 - **Fácil** — dividir & conquistar: workers pegam partes diferentes → merge-tudo → revisão.
 - **Difícil** — redundância & juiz: vários fazem o mesmo → merge sintético → loop de
   conserto (caça-bug, roda os testes se existirem, máx 3 rodadas).
+
+## Para IAs / agentes
+
+Se você é um agente de IA (Claude, Codex, Gemini…) operando este repo ou usando o
+`rege` como ferramenta, leia [`AGENTS.md`](AGENTS.md) — ele diz como invocar o `rege`
+de forma headless, quais ferramentas MCP existem, e as regras (workers isolados em
+worktree, nunca fazer merge sozinho, sempre abrir PR).
 
 ## Desenvolvimento
 
