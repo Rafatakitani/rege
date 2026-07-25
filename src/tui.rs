@@ -187,6 +187,14 @@ struct App {
     /// Home dir, kept as a field so tests can point the transcript lookup at a
     /// fixture instead of the real `~/.claude`.
     home: PathBuf,
+    /// Visual rows scrolled back from the bottom. 0 means pinned to the newest
+    /// message, which is where a fresh session sits.
+    scroll: usize,
+    /// Rows the chat pane had on the last frame — the page size for PageUp/Down
+    /// and the clamp for how far back scrolling can go.
+    chat_rows: usize,
+    /// Total wrapped rows the conversation currently occupies.
+    chat_total: usize,
 }
 
 impl App {
@@ -236,6 +244,9 @@ impl App {
             scan_rx: None,
             scanned_path: scan::state_path(&crate::dirs_home()),
             home: crate::dirs_home(),
+            scroll: 0,
+            chat_rows: 0,
+            chat_total: 0,
         }
     }
 
@@ -547,6 +558,21 @@ impl App {
         self.input_cursor = self.input.chars().count();
     }
 
+    /// Scrolls the conversation back, like a terminal's own scrollback: the
+    /// wheel moves it, and it clamps at the first line instead of scrolling
+    /// into empty space.
+    fn scroll_by(&mut self, delta: isize) {
+        let max = self.chat_total.saturating_sub(self.chat_rows);
+        let next = self.scroll as isize + delta;
+        self.scroll = next.clamp(0, max as isize) as usize;
+    }
+
+    fn scroll_page(&mut self, pages: isize) {
+        // One row of overlap, so a line isn't skipped between pages.
+        let step = self.chat_rows.saturating_sub(1).max(1) as isize;
+        self.scroll_by(pages * step);
+    }
+
     fn mouse_down(&mut self, col: u16, row: u16) {
         if in_rect(self.input_rect, col, row) {
             let inner_x = self.input_rect.x + 1; // left border
@@ -721,6 +747,9 @@ impl App {
         if line.is_empty() {
             return;
         }
+        // Sending snaps back to the newest message, the way typing into a
+        // terminal jumps out of its scrollback.
+        self.scroll = 0;
         self.history_push(&line);
         if line.starts_with('/') && is_known_command(&line) {
             self.dispatch(&line);
@@ -1557,6 +1586,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                                     app.history_next()
                                 }
                             }
+                            KeyCode::PageUp => app.scroll_page(1),
+                            KeyCode::PageDown => app.scroll_page(-1),
                             KeyCode::Char(c) => app.input_insert(c),
                             KeyCode::Backspace => app.input_backspace(),
                             KeyCode::Delete => app.input_delete(),
@@ -1581,6 +1612,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                     MouseEventKind::Down(MouseButton::Left) => app.mouse_down(m.column, m.row),
                     MouseEventKind::Drag(MouseButton::Left) => app.mouse_drag(m.column, m.row),
                     MouseEventKind::Up(MouseButton::Left) => app.mouse_up(m.column, m.row),
+                    // Wheel scrolls the conversation, like the terminal's own
+                    // scrollback — 3 rows per notch is the usual step.
+                    MouseEventKind::ScrollUp => app.scroll_by(3),
+                    MouseEventKind::ScrollDown => app.scroll_by(-3),
                     _ => {}
                 },
                 Event::Paste(text) => app.input_insert_str(&text),
@@ -1642,6 +1677,11 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
     app.input_rect = chunks[3];
 
     draw_header(chunks[0], buf, app, theme);
+    // Measure the chat before painting it: the wheel and PageUp/Down need the
+    // page size and the total, and both depend on this frame's width.
+    let (rows, total) = chat_metrics(chunks[1], app, theme);
+    app.chat_rows = rows;
+    app.chat_total = total;
     draw_chat(chunks[1], buf, app, theme);
     draw_agents(chunks[2], buf, app, theme);
     draw_input(chunks[3], buf, app, theme);
@@ -1751,6 +1791,20 @@ const BANNER: [&str; 5] = [
     "██ ██ █████ ████  █████",
 ];
 
+/// Visible rows and total wrapped rows of the chat pane, mirroring how
+/// `draw_chat`/`render_messages` lay it out. Kept next to them so the scroll
+/// clamp can't drift from what's actually on screen.
+fn chat_metrics(area: Rect, app: &App, theme: &str) -> (usize, usize) {
+    let width = area.width.saturating_sub(4);
+    let mut rows = area.height as usize;
+    if !app.conversation_started() {
+        // The wordmark eats the top of the pane before any message shows.
+        rows = rows.saturating_sub((BANNER.len() + 1).min(rows));
+    }
+    let total = app.chat.iter().flat_map(|m| chat_lines(theme, m, width)).count();
+    (rows, total)
+}
+
 fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     let inner = Rect {
         x: area.x + 2,
@@ -1828,16 +1882,29 @@ fn draw_banner(area: Rect, buf: &mut ratatui::buffer::Buffer, theme: &str) {
 
 fn render_messages(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     let rows = area.height as usize;
-    // Expand every message into its wrapped visual rows, then keep only the
-    // last `rows` — height is measured in display rows, not messages, so
-    // multi-line/long-line output neither collides nor clips.
-    let mut lines: Vec<Line> = app
+    // Expand every message into its wrapped visual rows, then window into them
+    // — height is measured in display rows, not messages, so multi-line/long
+    // output neither collides nor clips.
+    let lines: Vec<Line> = app
         .chat
         .iter()
         .flat_map(|m| chat_lines(theme, m, area.width))
         .collect();
-    let start = lines.len().saturating_sub(rows);
-    let visible = lines.split_off(start);
+    // `scroll` counts rows back from the bottom; clamped here too because the
+    // pane can shrink (terminal resize) between the scroll and the frame.
+    let max_back = lines.len().saturating_sub(rows);
+    let back = app.scroll.min(max_back);
+    let end = lines.len() - back;
+    let start = end.saturating_sub(rows);
+    let mut visible: Vec<Line> = lines[start..end].to_vec();
+
+    // Scrolled up: say so, and how much is below. Without this the pane just
+    // looks stuck — nothing on screen says the newest message is off-view.
+    if back > 0 {
+        if let Some(last) = visible.last_mut() {
+            *last = Line::from(styled(theme, Role::Accent, format!("↓ mais {back} linhas · fim ao rolar")));
+        }
+    }
     Paragraph::new(visible).render(area, buf);
 }
 
@@ -2974,6 +3041,56 @@ mod tests {
         let row = painted2.iter().find(|l| l.contains("sim, escanear")).expect("linha do overlay");
         assert!(!row.contains("agentes"), "painel de agentes vazando: {row}");
         assert!(!row.contains('─'), "borda de outro painel vazando: {row}");
+    }
+
+    #[test]
+    fn wheel_scrolls_the_conversation_and_stops_at_both_ends() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        for i in 0..40 {
+            app.push(ChatRole::Info, format!("linha {i}"));
+        }
+        // One frame to measure the pane, like the event loop does.
+        let painted = render_to_lines(&mut app, 80, 24);
+        assert!(painted.iter().any(|l| l.contains("linha 39")), "começa colado no fim");
+        assert_eq!(app.scroll, 0);
+
+        app.scroll_by(3); // one wheel notch up
+        assert_eq!(app.scroll, 3);
+        let painted = render_to_lines(&mut app, 80, 24);
+        assert!(painted.iter().any(|l| l.contains("mais 3 linhas")), "avisa que há coisa abaixo: {painted:?}");
+
+        // Can't scroll past the first line...
+        app.scroll_by(9999);
+        let top = app.scroll;
+        assert_eq!(top, app.chat_total.saturating_sub(app.chat_rows), "para na primeira linha");
+        let painted = render_to_lines(&mut app, 80, 24);
+        assert!(painted.iter().any(|l| l.contains("linha 0")), "topo à vista: {painted:?}");
+
+        // ...nor below the newest.
+        app.scroll_by(-9999);
+        assert_eq!(app.scroll, 0);
+
+        // Sending snaps back to the bottom.
+        app.scroll_by(5);
+        app.input = "oi".into();
+        app.submit();
+        assert_eq!(app.scroll, 0, "enviar volta pro fim");
+    }
+
+    #[test]
+    fn page_keys_move_a_screenful_at_a_time() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        for i in 0..100 {
+            app.push(ChatRole::Info, format!("linha {i}"));
+        }
+        render_to_lines(&mut app, 80, 24);
+        let page = app.chat_rows.saturating_sub(1);
+        app.scroll_page(1);
+        assert_eq!(app.scroll, page, "PageUp sobe uma tela cheia menos a linha de overlap");
+        app.scroll_page(-1);
+        assert_eq!(app.scroll, 0);
     }
 
     #[test]
