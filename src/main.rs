@@ -10,6 +10,7 @@ mod engine;
 mod mcp;
 mod playbook;
 mod rtk;
+mod scan;
 mod session;
 mod sessions;
 mod stream;
@@ -66,6 +67,12 @@ enum Cmd {
         #[arg(long, short)]
         verbose: bool,
     },
+    /// Escaneia o diretório atual e escreve um AGENTS.md descrevendo ele.
+    Scan {
+        /// Sobrescreve um AGENTS.md existente.
+        #[arg(long)]
+        force: bool,
+    },
     /// Renderiza um frame da TUI como texto (headless, sem tty) pra inspeção/debug.
     Render {
         /// Semeia estado de exemplo (chat + agentes).
@@ -98,6 +105,7 @@ fn main() -> Result<()> {
         Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
         Some(Cmd::Claude) => claude_orchestrator(&cfg),
         Some(Cmd::Update { git, branch, verbose }) => update(&git, branch.as_deref(), verbose),
+        Some(Cmd::Scan { force }) => scan_dir(&cwd, &cfg, &home, force),
         Some(Cmd::Render { demo, cols, rows }) => {
             let repo = cwd.to_string_lossy().to_string();
             println!("{}", tui::render_frame(&cfg, &repo, cols, rows, demo));
@@ -249,6 +257,16 @@ fn cargo_update_args(git: &str, branch: Option<&str>, verbose: bool) -> Vec<Stri
         a.push("--quiet".to_string());
     }
     a
+}
+
+/// One-shot context scan of `dir`. Also records the directory as answered, so
+/// the TUI doesn't turn around and offer what was just done by hand.
+fn scan_dir(dir: &Path, cfg: &Config, home: &Path, force: bool) -> Result<()> {
+    println!("escaneando {}… (uma chamada ao mestre)", dir.display());
+    let path = scan::run(dir, cfg, home, force)?;
+    let _ = scan::record(&scan::state_path(home), dir, "yes");
+    println!("✓ escrito: {}", path.display());
+    Ok(())
 }
 
 /// Instantiate a Session/Engine for `repo` and serve MCP over stdin/stdout.

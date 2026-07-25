@@ -61,6 +61,7 @@ rege update --verbose  # com o output cru do cargo (default é silencioso)
 rege                       # abre a TUI (orquestrador com chat, agentes, temas)
 rege exec "corrige o bug de login"   # headless (tipo `codex exec`), orquestra e imprime
 rege claude                # abre o claude interativo já em modo Rege (playbook+MCP)
+rege scan                  # escaneia o diretório atual e escreve o AGENTS.md
 rege doctor                # health check do roster de CLIs + mestre atual
 rege config                # imprime a config efetiva
 rege mcp-serve --repo .    # servidor MCP puro (JSON-RPC stdio) pro repo
@@ -78,6 +79,29 @@ com passthrough); desliga em `ui.auto_copy`.
 
 **Remoto:** a TUI roda em terminal, então do celular/outro device basta `ssh` (via
 Tailscale, p.ex.) + `tmux attach`. Sem app.
+
+## Contexto do diretório (`rege scan`)
+
+Na primeira vez que você abre o rege num diretório, ele pergunta se pode escanear e
+escrever um `AGENTS.md` descrevendo o lugar — igual ao `/init` do Claude Code. Vale pra
+qualquer pasta: rodou em `~/`, escreve em `~/`; rodou em `/economia`, escreve lá.
+
+`AGENTS.md` é de propósito: claude, codex e opencode já leem esse arquivo sozinhos,
+então o contexto chega nos workers sem o rege injetar nada no prompt deles.
+
+Como funciona por dentro: o rege levanta os fatos sozinho (git, extensões mais comuns,
+manifestos, comandos de build/test, início do README, árvore até 2 níveis) e manda esse
+resumo pro mestre numa chamada só. O modelo interpreta um digest pronto em vez de varrer
+o disco — sai barato e funciona fora de repositório git.
+
+- Pergunta **uma vez por diretório**. Recusou? A resposta fica em
+  `~/.config/rege/scanned.yml` e ele não pergunta de novo ali — nada é escrito no seu
+  projeto.
+- Já existe um `AGENTS.md`? Não pergunta, e `rege scan` se recusa a sobrescrever sem
+  `--force`.
+- `/scan` na TUI roda sob demanda; headless (`rege exec`, `mcp-serve`) nunca pergunta.
+- Em `~/` a varredura é rasa e limitada, e o prompt avisa o modelo que aquilo é uma home,
+  não um projeto.
 
 ## Configuração
 
@@ -160,7 +184,7 @@ worktree, nunca fazer merge sozinho, sempre abrir PR).
 ## Desenvolvimento
 
 ```bash
-cargo test    # 123 testes
+cargo test    # 147 testes
 cargo fmt && cargo clippy
 ```
 

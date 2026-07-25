@@ -68,10 +68,10 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 
 ## Trabalhando NESTE repositório (rege em si)
 
-- Rust. `cargo test` (123 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- Rust. `cargo test` (147 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
 - Módulos em `src/`: `config`, `command`, `worktree`, `tmux`, `agent`, `engine`,
   `session`, `mcp`, `theme`, `tui`, `buddy`, `stream`, `driver`, `sessions`, `playbook`,
-  `rtk`.
+  `rtk`, `scan`.
 - **`rtk`**: se o binário [`rtk`](https://github.com/rtk-ai/rtk) estiver no `PATH`, o
   diff que vai pro contexto do mestre (`diff_agent`/`review`) passa por `rtk git diff`
   (-75% de tokens). O `.patch` do `open_pr` e o git plumbing continuam crus — diff
@@ -81,5 +81,9 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
   autodetecção no `PATH`. Não crie um segundo botão pra mesma decisão.
   `rtk.hook_workers` (opt-in explícito) roda `rtk init --hook-only` dentro do worktree
   de cada worker listado em `rtk.clis` — autodetecção nunca liga isso sozinha.
+- **`scan`**: primeira vez num diretório → oferece escrever um `AGENTS.md` descrevendo
+  ele. Coleta determinística e limitada (`MAX_FILES`/`MAX_DEPTH`) + uma chamada ao
+  mestre com o digest pronto. A resposta fica em `~/.config/rege/scanned.yml`, nunca no
+  projeto do usuário; nunca sobrescreve um `AGENTS.md` existente sem `--force`.
 - Desenho completo: `docs/superpowers/specs/2026-07-23-rege-design.md`.
 - Preserve a atribuição MIT do `/buddy` (port de ramarivera/claude-buddy) no topo de `src/buddy.rs`.
