@@ -549,15 +549,32 @@ impl App {
         self.menu_cursor = next as usize;
     }
 
+    /// Index of the highlighted row, clamped the same way the popup draws it —
+    /// what you see selected is what Tab/Enter take.
+    fn menu_selected(&self, len: usize) -> usize {
+        self.menu_cursor.min(len.saturating_sub(1))
+    }
+
     /// Tab: replace the input with the highlighted command. No-op when the menu
     /// is closed, so Tab stays inert during normal typing.
     fn menu_complete(&mut self) {
         let menu = self.command_menu();
-        if let Some((cmd, _)) = menu.get(self.menu_cursor).or_else(|| menu.first()) {
+        if let Some((cmd, _)) = menu.get(self.menu_selected(menu.len())) {
             self.input = cmd.to_string();
             self.input_cursor = self.input.chars().count();
             self.menu_cursor = 0;
         }
+    }
+
+    /// Enter with the popup open runs the highlighted command, not the
+    /// half-typed prefix under the caret. Returns false when it's closed, so
+    /// the caller falls through to submitting whatever was typed.
+    fn menu_accept(&mut self) -> bool {
+        if self.command_menu().is_empty() {
+            return false;
+        }
+        self.menu_complete();
+        true
     }
 
     fn submit(&mut self) {
@@ -1102,6 +1119,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             KeyCode::Home => app.input_home(),
                             KeyCode::End => app.input_end(),
                             KeyCode::Enter => {
+                                app.menu_accept();
                                 let line = app.input.trim().to_string();
                                 if matches!(line.as_str(), "/quit" | "/q" | "quit" | "exit" | ":q") {
                                     break;
@@ -1756,7 +1774,7 @@ fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: R
     let inner = block.inner(rect);
     block.render(rect, buf);
 
-    let cursor = app.menu_cursor.min(menu.len().saturating_sub(1));
+    let cursor = app.menu_selected(menu.len());
     let lines: Vec<Line> = menu
         .iter()
         .enumerate()
@@ -2189,6 +2207,28 @@ mod tests {
         app.menu_complete();
         assert_eq!(app.input, COMMAND_CATALOG[0].0);
         assert_eq!(app.input_cursor, app.input.chars().count());
+    }
+
+    #[test]
+    fn enter_runs_the_highlighted_command_not_the_typed_prefix() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        // Bare `/` with the popup open and the cursor moved off the first row:
+        // Enter must take that row, not the lone slash under the caret.
+        app.input = "/".into();
+        app.menu_move(2);
+        let expected = app.command_menu()[2].0;
+        assert!(app.menu_accept());
+        assert_eq!(app.input, expected);
+    }
+
+    #[test]
+    fn menu_accept_leaves_plain_text_alone() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.input = "faz X".into();
+        assert!(!app.menu_accept(), "closed menu must fall through to submit");
+        assert_eq!(app.input, "faz X");
     }
 
     #[test]
