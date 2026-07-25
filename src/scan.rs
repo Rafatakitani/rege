@@ -214,6 +214,11 @@ pub fn prompt(f: &Facts) -> String {
         s.push_str(&format!("\nREADME (início):\n{r}\n"));
     }
     s.push_str(
+        "\nSe já existir um AGENTS.md neste diretório, ignore-o: você está escrevendo \
+         a versão nova do zero. Não pergunte nada, não ofereça opções, não comente \
+         a tarefa — a sua resposta inteira vai virar o arquivo, literalmente.\n",
+    );
+    s.push_str(
         "\nResponda APENAS com o markdown do arquivo, sem cercas de código em volta \
          e sem comentários seus. Seções sugeridas: o que é, como rodar/testar, \
          estrutura, convenções. Seja específico e curto; não invente o que não \
@@ -275,8 +280,22 @@ pub fn run(dir: &Path, cfg: &Config, home: &Path, force: bool) -> Result<PathBuf
     if body.is_empty() {
         bail!("o mestre respondeu vazio");
     }
+    if !looks_like_a_document(&body) {
+        bail!(
+            "o mestre respondeu conversando, não com um documento — nada foi escrito. \
+             resposta:\n{body}"
+        );
+    }
     std::fs::write(&target, format!("{body}\n"))?;
     Ok(target)
+}
+
+/// The master's stdout becomes the file byte for byte, so a chatty answer
+/// ("já existe, quer que eu…") would silently replace a hand-written AGENTS.md.
+/// A real document opens with a heading and isn't three lines long.
+fn looks_like_a_document(body: &str) -> bool {
+    let has_heading = body.lines().next().is_some_and(|l| l.trim_start().starts_with('#'));
+    has_heading && body.lines().filter(|l| !l.trim().is_empty()).count() >= 3
 }
 
 /// Models like wrapping a whole file in ```markdown despite being told not to.
@@ -385,6 +404,24 @@ mod tests {
         let err = run(&d, &Config::default(), Path::new("/home/x"), false).unwrap_err();
         assert!(err.to_string().contains("--force"));
         assert_eq!(fs::read_to_string(d.join(CONTEXT_FILE)).unwrap(), "escrito à mão\n");
+    }
+
+    #[test]
+    fn a_chatty_answer_is_not_a_document() {
+        // The real regression: `scan --force` replaced a 88-line AGENTS.md with this.
+        let chat = "AGENTS.md já existe, com conteúdo bem específico.\n\nQuer que eu:\n1. mantenha,\n2. atualize?";
+        assert!(!looks_like_a_document(chat));
+        assert!(!looks_like_a_document("# Projeto\n\nfaz X."), "duas linhas é resposta, não arquivo");
+        assert!(looks_like_a_document("# Projeto\n\nfaz X.\n\n## Testes\n\n`cargo test`"));
+    }
+
+    #[test]
+    fn prompt_tells_the_master_not_to_chat() {
+        let d = tmp("no-chat");
+        fs::write(d.join(CONTEXT_FILE), "# já tem\n").unwrap();
+        let p = prompt(&collect(&d, Path::new("/outro")));
+        assert!(p.contains("ignore-o"), "o modelo precisa saber pra ignorar o arquivo atual");
+        assert!(p.contains("Não pergunte nada"));
     }
 
     #[test]
