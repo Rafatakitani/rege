@@ -104,7 +104,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
         Some(Cmd::Claude) => claude_orchestrator(&cfg),
-        Some(Cmd::Update { git, branch, verbose }) => update(&git, branch.as_deref(), verbose),
+        Some(Cmd::Update { git, branch, verbose }) => update(&git, branch.as_deref(), verbose, &home),
         Some(Cmd::Scan { force }) => scan_dir(&cwd, &cfg, &home, force),
         Some(Cmd::Render { demo, cols, rows }) => {
             let repo = cwd.to_string_lossy().to_string();
@@ -197,15 +197,21 @@ fn claude_orchestrator(cfg: &Config) -> Result<()> {
 /// Self-update: rebuild+reinstall the `rege` binary from git via cargo. No
 /// local checkout needed — cargo clones the repo itself and overwrites the
 /// binary in `~/.cargo/bin`.
-fn update(git: &str, branch: Option<&str>, verbose: bool) -> Result<()> {
+fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result<()> {
     let args = cargo_update_args(git, branch, verbose);
+    let cache = build_cache_dir(home);
     let which = branch.map(|b| format!(" ({b})")).unwrap_or_default();
-    println!("atualizando rege{which}… (compilando, ~1min)");
+    let first = !cache.exists();
+    if first {
+        println!("atualizando rege{which}… (compilando, ~1min)");
+    } else {
+        println!("atualizando rege{which}… (compilando, cache quente)");
+    }
 
     // Quiet by default: 90 lines of `Compiling foo v1.2.3` say nothing. The
     // output is captured, not discarded, so a failure still shows why.
     if verbose {
-        return match Command::new("cargo").args(&args).status() {
+        return match Command::new("cargo").args(&args).env("CARGO_TARGET_DIR", &cache).status() {
             Ok(s) if s.success() => {
                 println!("✓ rege atualizado. `rege --version` pra conferir.");
                 Ok(())
@@ -214,7 +220,7 @@ fn update(git: &str, branch: Option<&str>, verbose: bool) -> Result<()> {
             Err(e) => cargo_missing(e),
         };
     }
-    match Command::new("cargo").args(&args).output() {
+    match Command::new("cargo").args(&args).env("CARGO_TARGET_DIR", &cache).output() {
         Ok(o) if o.status.success() => {
             println!("✓ rege atualizado. `rege --version` pra conferir.");
             Ok(())
@@ -226,6 +232,14 @@ fn update(git: &str, branch: Option<&str>, verbose: bool) -> Result<()> {
         }
         Err(e) => cargo_missing(e),
     }
+}
+
+/// `cargo install --git` builds into a throwaway temp dir, so every update
+/// recompiles all ~95 dependencies from scratch. Pointing it at a persistent
+/// target dir means only the crates that actually changed get rebuilt. It's a
+/// cache — safe to delete, costs disk.
+fn build_cache_dir(home: &Path) -> PathBuf {
+    home.join(".cache/rege/build")
 }
 
 fn cargo_missing(e: std::io::Error) -> ! {
