@@ -52,6 +52,7 @@ Pra atualizar depois, de qualquer diretório:
 ```bash
 rege update            # puxa e reinstala a última versão do upstream
 rege update --branch x # ou uma branch/tag específica
+rege update --verbose  # com o output cru do cargo (default é silencioso)
 ```
 
 ## Uso
