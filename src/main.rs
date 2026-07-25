@@ -30,6 +30,10 @@ use std::process::Command;
 /// Upstream oficial usado por `rege update` quando nenhum `--git` é passado.
 const REGE_GIT_URL: &str = "https://github.com/Rafatakitani/rege.git";
 
+/// Perfil de build usado só pelo `update` (ver `[profile.fastinstall]` no
+/// `Cargo.toml`): otimiza tempo de compilação, não o binário.
+const FAST_PROFILE: &str = "fastinstall";
+
 /// `0.2.0 (b178154)` — the commit is what actually tells you whether an update
 /// landed, since the semver only moves when someone bumps it by hand.
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("REGE_GIT_HASH"), ")");
@@ -203,7 +207,7 @@ fn claude_orchestrator(cfg: &Config) -> Result<()> {
 /// local checkout needed — cargo clones the repo itself and overwrites the
 /// binary in `~/.cargo/bin`.
 fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result<()> {
-    let args = cargo_update_args(git, branch, verbose);
+    let args = cargo_update_args(git, branch, verbose, Some(FAST_PROFILE));
     let cache = build_cache_dir(home);
     let which = branch.map(|b| format!(" ({b})")).unwrap_or_default();
     let first = !cache.exists();
@@ -216,27 +220,52 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result
     // Quiet by default: 90 lines of `Compiling foo v1.2.3` say nothing. The
     // output is captured, not discarded, so a failure still shows why.
     if verbose {
-        return match Command::new("cargo").args(&args).env("CARGO_TARGET_DIR", &cache).status() {
-            Ok(s) if s.success() => {
-                report_installed_version();
-                Ok(())
+        let ok = run_cargo(&args, &cache, true).map_or_else(|e| cargo_missing(e), |(ok, _)| ok);
+        if !ok {
+            // Sem output capturado pra inspecionar, então a segunda tentativa
+            // é incondicional: no pior caso o erro real aparece duas vezes.
+            let plain = cargo_update_args(git, branch, verbose, None);
+            let ok = run_cargo(&plain, &cache, true).map_or_else(|e| cargo_missing(e), |(ok, _)| ok);
+            if !ok {
+                std::process::exit(1);
             }
-            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
-            Err(e) => cargo_missing(e),
-        };
-    }
-    match Command::new("cargo").args(&args).env("CARGO_TARGET_DIR", &cache).output() {
-        Ok(o) if o.status.success() => {
-            report_installed_version();
-            Ok(())
         }
-        Ok(o) => {
-            eprint!("{}", tail_lines(&String::from_utf8_lossy(&o.stderr), 20));
-            eprintln!("falha ao atualizar. `rege update --verbose` pro output completo.");
-            std::process::exit(o.status.code().unwrap_or(1));
-        }
-        Err(e) => cargo_missing(e),
+        report_installed_version();
+        return Ok(());
     }
+    let (mut ok, mut err) = run_cargo(&args, &cache, false).unwrap_or_else(|e| cargo_missing(e));
+    if !ok && needs_plain_retry(&err) {
+        // Commit antigo, sem o perfil no Cargo.toml (ou sem Cargo.lock). Cai
+        // pro release em vez de deixar o update quebrado por otimização.
+        let plain = cargo_update_args(git, branch, verbose, None);
+        (ok, err) = run_cargo(&plain, &cache, false).unwrap_or_else(|e| cargo_missing(e));
+    }
+    if !ok {
+        eprint!("{}", tail_lines(&err, 20));
+        eprintln!("falha ao atualizar. `rege update --verbose` pro output completo.");
+        std::process::exit(1);
+    }
+    report_installed_version();
+    Ok(())
+}
+
+/// Roda o cargo, devolvendo (sucesso, stderr). Em modo verboso o output vai
+/// direto pro terminal e o stderr volta vazio.
+fn run_cargo(args: &[String], cache: &Path, verbose: bool) -> std::io::Result<(bool, String)> {
+    let mut cmd = Command::new("cargo");
+    cmd.args(args).env("CARGO_TARGET_DIR", cache);
+    if verbose {
+        return cmd.status().map(|s| (s.success(), String::new()));
+    }
+    cmd.output().map(|o| (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned()))
+}
+
+/// Distingue "esse commit é velho demais pros flags rápidos" de uma falha de
+/// compilação de verdade — só o primeiro caso merece uma segunda tentativa.
+/// Perfil ausente: "profile `fastinstall` is not defined". Lock ausente ou
+/// desatualizado: o cargo cita o próprio `--locked` na mensagem.
+fn needs_plain_retry(stderr: &str) -> bool {
+    (stderr.contains(FAST_PROFILE) && stderr.contains("is not defined")) || stderr.contains("--locked")
 }
 
 /// Prints what actually got installed. "run `rege --version` to check" put the
@@ -283,11 +312,21 @@ fn tail_lines(text: &str, n: usize) -> String {
 
 /// The `cargo install` argv for a self-update. Split out so the flag wiring is
 /// unit-testable without shelling out.
-fn cargo_update_args(git: &str, branch: Option<&str>, verbose: bool) -> Vec<String> {
+fn cargo_update_args(git: &str, branch: Option<&str>, verbose: bool, profile: Option<&str>) -> Vec<String> {
     let mut a = vec!["install".to_string(), "--git".to_string(), git.to_string(), "--force".to_string()];
     if let Some(b) = branch {
         a.push("--branch".to_string());
         a.push(b.to_string());
+    }
+    if let Some(p) = profile {
+        // `--locked` anda junto com o perfil rápido: sem ele o cargo re-resolve
+        // as 94 dependências e atualiza o índice do crates.io a cada update —
+        // caro, e instala versões que ninguém testou. Ambos dependem de o
+        // commit ser recente (perfil + Cargo.lock no repo), e ambos caem juntos
+        // no fallback se não for.
+        a.push("--profile".to_string());
+        a.push(p.to_string());
+        a.push("--locked".to_string());
     }
     if !verbose {
         a.push("--quiet".to_string());
@@ -366,14 +405,14 @@ mod tests {
     #[test]
     fn cargo_update_args_defaults_to_forced_quiet_git_install() {
         assert_eq!(
-            cargo_update_args(REGE_GIT_URL, None, false),
+            cargo_update_args(REGE_GIT_URL, None, false, None),
             vec!["install", "--git", REGE_GIT_URL, "--force", "--quiet"]
         );
     }
 
     #[test]
     fn cargo_update_args_appends_branch() {
-        let a = cargo_update_args("https://x/y.git", Some("dev"), false);
+        let a = cargo_update_args("https://x/y.git", Some("dev"), false, None);
         assert_eq!(
             a,
             vec!["install", "--git", "https://x/y.git", "--force", "--branch", "dev", "--quiet"]
@@ -382,8 +421,51 @@ mod tests {
 
     #[test]
     fn cargo_update_args_verbose_drops_quiet() {
-        let a = cargo_update_args("https://x/y.git", None, true);
+        let a = cargo_update_args("https://x/y.git", None, true, None);
         assert_eq!(a, vec!["install", "--git", "https://x/y.git", "--force"]);
+    }
+
+    #[test]
+    fn cargo_update_args_passes_the_fast_profile_and_locks() {
+        let a = cargo_update_args("https://x/y.git", None, false, Some(FAST_PROFILE));
+        assert_eq!(
+            a,
+            vec![
+                "install",
+                "--git",
+                "https://x/y.git",
+                "--force",
+                "--profile",
+                "fastinstall",
+                "--locked",
+                "--quiet"
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_retry_only_for_the_old_commit_case() {
+        assert!(needs_plain_retry("error: profile `fastinstall` is not defined"));
+        assert!(needs_plain_retry("error: the lock file needs to be updated but --locked was passed"));
+        // Falha de compilação de verdade não deve virar fallback silencioso.
+        assert!(!needs_plain_retry("error[E0308]: mismatched types"));
+        assert!(!needs_plain_retry("error: profile `bench` is not defined"));
+    }
+
+    /// `--locked` exige o `Cargo.lock` versionado; se ele sair do repo todo
+    /// update passa a pagar dois builds.
+    #[test]
+    fn cargo_lock_is_committed() {
+        let lock = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock");
+        assert!(std::path::Path::new(lock).exists(), "Cargo.lock sumiu");
+    }
+
+    /// O perfil que o `update` pede tem que existir aqui, senão todo update
+    /// paga o fallback (dois builds) em vez de um.
+    #[test]
+    fn the_fast_profile_exists_in_cargo_toml() {
+        let toml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
+        assert!(toml.contains(&format!("[profile.{FAST_PROFILE}]")), "perfil sumiu do Cargo.toml");
     }
 
     #[test]
