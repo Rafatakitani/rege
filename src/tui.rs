@@ -24,7 +24,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 use std::io::Stdout;
 use std::path::PathBuf;
@@ -1612,7 +1612,7 @@ fn draw_buddy_widget(
         height,
     };
 
-    Paragraph::new("").render(rect, buf);
+    Clear.render(rect, buf); // real clear: an empty Paragraph leaves cells intact
 
     let block = rounded_block(theme, "", Role::Accent);
     let inner = block.inner(rect);
@@ -1883,7 +1883,9 @@ fn draw_theme_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, c
     let rect = centered_rect(46, height, area);
 
     // Clear the popup area so the background chat text doesn't bleed through.
-    Paragraph::new("").render(rect, buf);
+    // `Paragraph::new("")` does NOT do this — it draws nothing and leaves the
+    // cells underneath intact, which let the banner and panels show through.
+    Clear.render(rect, buf);
 
     let block = rounded_block(theme, " tema ", Role::Dim);
     let inner = block.inner(rect);
@@ -1924,7 +1926,9 @@ fn draw_resume_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
     let rect = centered_rect(60, height, area);
 
     // Clear the popup area so the background chat text doesn't bleed through.
-    Paragraph::new("").render(rect, buf);
+    // `Paragraph::new("")` does NOT do this — it draws nothing and leaves the
+    // cells underneath intact, which let the banner and panels show through.
+    Clear.render(rect, buf);
 
     let block = rounded_block(theme, " sessoes ", Role::Dim);
     let inner = block.inner(rect);
@@ -1962,7 +1966,9 @@ fn draw_agents_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
     let rect = centered_rect(60, height, area);
 
     // Clear the popup area so the background chat text doesn't bleed through.
-    Paragraph::new("").render(rect, buf);
+    // `Paragraph::new("")` does NOT do this — it draws nothing and leaves the
+    // cells underneath intact, which let the banner and panels show through.
+    Clear.render(rect, buf);
 
     let block = rounded_block(theme, " agentes ", Role::Dim);
     let inner = block.inner(rect);
@@ -2011,7 +2017,9 @@ fn draw_scan_offer(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cur
     let rect = centered_rect(62, 10, area);
 
     // Clear the popup area so the background chat text doesn't bleed through.
-    Paragraph::new("").render(rect, buf);
+    // `Paragraph::new("")` does NOT do this — it draws nothing and leaves the
+    // cells underneath intact, which let the banner and panels show through.
+    Clear.render(rect, buf);
 
     let block = rounded_block(theme, " primeira vez aqui ", Role::Accent);
     let inner = block.inner(rect);
@@ -2052,7 +2060,7 @@ fn draw_agents_add(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
         _ => "",
     };
     let rect = centered_rect(60, 7, area);
-    Paragraph::new("").render(rect, buf);
+    Clear.render(rect, buf); // real clear: an empty Paragraph leaves cells intact
     let block = rounded_block(theme, " novo agente ", Role::Dim);
     let inner = block.inner(rect);
     block.render(rect, buf);
@@ -2084,7 +2092,7 @@ fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: R
     let width = input_rect.width.min(60).max(24);
     let rect = Rect { x: input_rect.x, y, width, height };
 
-    Paragraph::new("").render(rect, buf);
+    Clear.render(rect, buf); // real clear: an empty Paragraph leaves cells intact
     let block = rounded_block(theme, " comandos ", Role::Dim);
     let inner = block.inner(rect);
     block.render(rect, buf);
@@ -2591,6 +2599,31 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         draw(area, &mut buf, app);
         capture_row_text(&buf)
+    }
+
+    /// Regression: every overlay "cleared" its area with `Paragraph::new("")`,
+    /// which draws nothing and leaves the cells underneath — so the banner and
+    /// the agents panel showed straight through the popup.
+    #[test]
+    fn overlays_clear_what_is_underneath_them() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.open_agents_picker();
+        let painted = render_to_lines(&mut app, 80, 24);
+        let overlay: Vec<&String> = painted.iter().filter(|l| l.contains("Roster de agentes")).collect();
+        assert_eq!(overlay.len(), 1, "overlay devia aparecer uma vez: {painted:?}");
+        // The wordmark is drawn behind the popup; none of it may survive on the
+        // overlay's own rows.
+        assert!(!overlay[0].contains('█'), "banner vazando por dentro do overlay: {}", overlay[0]);
+
+        let d = scan_tmp("bleed");
+        let mut app2 = App::new(&config, "/tmp/outro");
+        app2.scanned_path = d.join("s.yml");
+        app2.offer_scan_if_first_run();
+        let painted2 = render_to_lines(&mut app2, 80, 24);
+        let row = painted2.iter().find(|l| l.contains("sim, escanear")).expect("linha do overlay");
+        assert!(!row.contains("agentes"), "painel de agentes vazando: {row}");
+        assert!(!row.contains('─'), "borda de outro painel vazando: {row}");
     }
 
     #[test]
