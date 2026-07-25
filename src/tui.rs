@@ -3,7 +3,8 @@
 //! `screen.rb` + `dashboard.rb`. No streaming yet — Enter just echoes the
 //! turn into chat as a placeholder until the master driver lands.
 
-use crate::config::Config;
+use crate::command;
+use crate::config::{Config, RosterEntry};
 use crate::driver;
 use crate::playbook;
 use crate::sessions::{self, SessionRec};
@@ -104,6 +105,23 @@ enum Mode {
     Normal,
     ThemePicker { cursor: usize },
     ResumePicker { cursor: usize },
+    /// Roster overlay: agents grouped by provider, each with its role. Also
+    /// offers connecting installed-but-unlisted CLIs and a manual-add row.
+    AgentsPicker { cursor: usize },
+    /// Text prompt for adding a roster entry by hand: `cli [role] [model]`.
+    AgentsAdd { input: String },
+}
+
+/// A rendered line in the agents overlay. `Header` rows are labels only; every
+/// other variant is selectable and the picker cursor walks them in this order.
+enum AgentsRow {
+    Header(String),
+    /// Index into `App::roster`.
+    Entry(usize),
+    /// Installed CLI absent from the roster — selecting it adds a worker.
+    Connect(String),
+    /// The "add by hand" action row.
+    AddManual,
 }
 
 struct App {
@@ -134,6 +152,13 @@ struct App {
     selection_start: Option<(u16, u16)>,
     selection_end: Option<(u16, u16)>,
     flash: Option<(String, Instant)>,
+    roster: Vec<RosterEntry>,
+    /// Known CLIs found on PATH, cached when the picker opens so rendering
+    /// stays free of filesystem probes.
+    installed_clis: Vec<String>,
+    /// Highlighted row in the slash-command autocomplete popup. Only meaningful
+    /// while the menu is open (input is a bare `/prefix`).
+    menu_cursor: usize,
 }
 
 impl App {
@@ -174,6 +199,9 @@ impl App {
             selection_start: None,
             selection_end: None,
             flash: None,
+            roster: config.roster.clone(),
+            installed_clis: Vec::new(),
+            menu_cursor: 0,
         }
     }
 
@@ -196,7 +224,10 @@ impl App {
     fn active_theme(&self) -> &str {
         match self.mode {
             Mode::ThemePicker { cursor } => theme::names()[cursor],
-            Mode::Normal | Mode::ResumePicker { .. } => &self.theme,
+            Mode::Normal
+            | Mode::ResumePicker { .. }
+            | Mode::AgentsPicker { .. }
+            | Mode::AgentsAdd { .. } => &self.theme,
         }
     }
 
@@ -258,10 +289,152 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    fn open_agents_picker(&mut self) {
+        self.installed_clis =
+            command::KNOWN_CLIS.iter().filter(|c| cli_installed(c)).map(|c| c.to_string()).collect();
+        self.mode = Mode::AgentsPicker { cursor: 0 };
+    }
+
+    /// The overlay's rows, grouped by provider then by the connect/add actions.
+    /// Both navigation and rendering consume this so the cursor never drifts
+    /// from what's on screen.
+    fn agents_rows(&self) -> Vec<AgentsRow> {
+        let mut rows = Vec::new();
+        // Providers in a stable order: known CLIs first, then any others the
+        // roster references, so grouping is deterministic across frames.
+        let mut providers: Vec<String> = Vec::new();
+        for c in command::KNOWN_CLIS {
+            if self.roster.iter().any(|r| r.cli == *c) {
+                providers.push(c.to_string());
+            }
+        }
+        for r in &self.roster {
+            if !providers.contains(&r.cli) {
+                providers.push(r.cli.clone());
+            }
+        }
+        for cli in &providers {
+            rows.push(AgentsRow::Header(cli.clone()));
+            for (i, entry) in self.roster.iter().enumerate() {
+                if &entry.cli == cli {
+                    rows.push(AgentsRow::Entry(i));
+                }
+            }
+        }
+        let available: Vec<&String> =
+            self.installed_clis.iter().filter(|c| !self.roster.iter().any(|r| &r.cli == *c)).collect();
+        if !available.is_empty() {
+            rows.push(AgentsRow::Header("disponíveis".into()));
+            for cli in available {
+                rows.push(AgentsRow::Connect(cli.clone()));
+            }
+        }
+        rows.push(AgentsRow::AddManual);
+        rows
+    }
+
+    /// Positions in `agents_rows()` that the cursor can land on (everything
+    /// except headers).
+    fn agents_selectable(&self) -> Vec<usize> {
+        self.agents_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !matches!(r, AgentsRow::Header(_)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn agents_picker_move(&mut self, delta: isize) {
+        if let Mode::AgentsPicker { cursor } = self.mode {
+            let n = self.agents_selectable().len();
+            if n == 0 {
+                return;
+            }
+            let next = (cursor as isize + delta).clamp(0, n as isize - 1);
+            self.mode = Mode::AgentsPicker { cursor: next as usize };
+        }
+    }
+
+    /// Enter on the selected row: connect an available CLI, open the manual-add
+    /// prompt, or do nothing on a roster entry (Enter is a no-op there; removal
+    /// is `x`/Delete).
+    fn agents_picker_confirm(&mut self) {
+        let Mode::AgentsPicker { cursor } = self.mode else { return };
+        let rows = self.agents_rows();
+        let Some(&row_idx) = self.agents_selectable().get(cursor) else { return };
+        match &rows[row_idx] {
+            AgentsRow::Connect(cli) => {
+                let cli = cli.clone();
+                self.roster.push(RosterEntry { role: "worker".into(), cli: cli.clone(), model: None });
+                self.persist_roster();
+                self.push(ChatRole::Info, format!("agente conectado: {cli} (worker)"));
+            }
+            AgentsRow::AddManual => {
+                self.mode = Mode::AgentsAdd { input: String::new() };
+            }
+            AgentsRow::Entry(_) | AgentsRow::Header(_) => {}
+        }
+    }
+
+    /// `x`/Delete on a roster entry removes it from the roster and persists.
+    fn agents_picker_remove(&mut self) {
+        let Mode::AgentsPicker { cursor } = self.mode else { return };
+        let rows = self.agents_rows();
+        let Some(&row_idx) = self.agents_selectable().get(cursor) else { return };
+        if let AgentsRow::Entry(i) = rows[row_idx] {
+            if i < self.roster.len() {
+                let removed = self.roster.remove(i);
+                self.persist_roster();
+                self.push(ChatRole::Info, format!("agente removido: {} ({})", removed.cli, removed.role));
+                // Clamp the cursor: the row count just shrank.
+                let n = self.agents_selectable().len();
+                let next = cursor.min(n.saturating_sub(1));
+                self.mode = Mode::AgentsPicker { cursor: next };
+            }
+        }
+    }
+
+    fn agents_picker_cancel(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
+    fn agents_add_confirm(&mut self) {
+        let Mode::AgentsAdd { input } = &self.mode else { return };
+        let mut parts = input.split_whitespace();
+        let cli = parts.next().map(str::to_string);
+        let role = parts.next().unwrap_or("worker").to_string();
+        let model = parts.next().map(str::to_string);
+        match cli {
+            None => {
+                self.push(ChatRole::Error, "uso: cli [role] [model] — ex: codex worker o3");
+            }
+            Some(cli) if !command::KNOWN_CLIS.contains(&cli.as_str()) => {
+                self.push(
+                    ChatRole::Error,
+                    format!("cli desconhecido: {cli} (conhecidos: {})", command::KNOWN_CLIS.join(", ")),
+                );
+            }
+            Some(cli) => {
+                self.roster.push(RosterEntry { role: role.clone(), cli: cli.clone(), model: model.clone() });
+                self.persist_roster();
+                let m = model.as_deref().unwrap_or("(default)");
+                self.push(ChatRole::Info, format!("agente adicionado: {cli} · {role} · {m}"));
+            }
+        }
+        self.open_agents_picker();
+    }
+
+    fn persist_roster(&mut self) {
+        if let Err(e) = save_roster_to_config(&self.roster) {
+            self.push(ChatRole::Error, format!("erro ao salvar roster: {e}"));
+        }
+    }
+
     fn input_insert(&mut self, c: char) {
         let byte_idx = self.input.char_indices().nth(self.input_cursor).map(|(i, _)| i).unwrap_or(self.input.len());
         self.input.insert(byte_idx, c);
         self.input_cursor += 1;
+        self.menu_cursor = 0;
     }
 
     /// Inserts pasted text as a single logical line: `input` has no real
@@ -272,6 +445,7 @@ impl App {
         let byte_idx = self.input.char_indices().nth(self.input_cursor).map(|(i, _)| i).unwrap_or(self.input.len());
         self.input.insert_str(byte_idx, &text);
         self.input_cursor += text.chars().count();
+        self.menu_cursor = 0;
     }
 
     fn input_backspace(&mut self) {
@@ -281,12 +455,14 @@ impl App {
         let byte_idx = self.input.char_indices().nth(self.input_cursor - 1).map(|(i, _)| i).unwrap();
         self.input.remove(byte_idx);
         self.input_cursor -= 1;
+        self.menu_cursor = 0;
     }
 
     fn input_delete(&mut self) {
         if let Some((byte_idx, _)) = self.input.char_indices().nth(self.input_cursor) {
             self.input.remove(byte_idx);
         }
+        self.menu_cursor = 0;
     }
 
     fn input_left(&mut self) {
@@ -351,6 +527,37 @@ impl App {
         }
         copy_to_clipboard(&text);
         self.flash = Some((format!("copiado {} chars · /config desativa", text.chars().count()), Instant::now()));
+    }
+
+    /// Slash-command matches for the autocomplete popup: non-empty only while
+    /// the input is a bare `/prefix` (leading `/`, no space yet). Empty means
+    /// the popup is closed.
+    fn command_menu(&self) -> Vec<(&'static str, &'static str)> {
+        let inp = self.input.trim_start();
+        if !inp.starts_with('/') || inp.chars().any(char::is_whitespace) {
+            return Vec::new();
+        }
+        COMMAND_CATALOG.iter().filter(|(cmd, _)| cmd.starts_with(inp)).copied().collect()
+    }
+
+    fn menu_move(&mut self, delta: isize) {
+        let n = self.command_menu().len();
+        if n == 0 {
+            return;
+        }
+        let next = (self.menu_cursor as isize + delta).rem_euclid(n as isize);
+        self.menu_cursor = next as usize;
+    }
+
+    /// Tab: replace the input with the highlighted command. No-op when the menu
+    /// is closed, so Tab stays inert during normal typing.
+    fn menu_complete(&mut self) {
+        let menu = self.command_menu();
+        if let Some((cmd, _)) = menu.get(self.menu_cursor).or_else(|| menu.first()) {
+            self.input = cmd.to_string();
+            self.input_cursor = self.input.chars().count();
+            self.menu_cursor = 0;
+        }
     }
 
     fn submit(&mut self) {
@@ -457,7 +664,7 @@ impl App {
                 self.push(ChatRole::Info, "  /model [nome]    troca modelo do mestre (sem arg mostra atual)");
                 self.push(ChatRole::Info, "  /config          mostra config efetiva");
                 self.push(ChatRole::Info, "  /resume          retoma sessão anterior");
-                self.push(ChatRole::Info, "  /agents          lista agentes ativos");
+                self.push(ChatRole::Info, "  /agents          roster de agentes (ativos: /agents ativos)");
                 self.push(ChatRole::Info, "  /buddy [pet]     bicho de estimação");
                 self.push(ChatRole::Info, "  /quit            sai (ou exit/quit/:q)");
             }
@@ -499,18 +706,23 @@ impl App {
                 }
             },
             "/resume" => self.open_resume_picker(),
-            "/agents" => {
-                if self.agents.is_empty() {
-                    self.push(ChatRole::Info, "nenhum agente ativo");
-                } else {
-                    let names: Vec<String> = self
-                        .agents
-                        .iter()
-                        .map(|a| format!("{} ({})", a.name, a.state.label()))
-                        .collect();
-                    self.push(ChatRole::Info, names.join(", "));
+            "/agents" => match parts.next() {
+                // `/agents ativos` keeps the old inline list of running workers;
+                // bare `/agents` opens the roster overlay.
+                Some("ativos") | Some("running") => {
+                    if self.agents.is_empty() {
+                        self.push(ChatRole::Info, "nenhum agente ativo");
+                    } else {
+                        let names: Vec<String> = self
+                            .agents
+                            .iter()
+                            .map(|a| format!("{} ({})", a.name, a.state.label()))
+                            .collect();
+                        self.push(ChatRole::Info, names.join(", "));
+                    }
                 }
-            }
+                _ => self.open_agents_picker(),
+            },
             "/buddy" => match parts.next() {
                 None => {
                     let seed = buddy_seed();
@@ -537,6 +749,19 @@ impl App {
 
 const KNOWN_COMMANDS: &[&str] =
     &["/quit", "/q", "/help", "/?", "/model", "/config", "/theme", "/resume", "/agents", "/buddy"];
+
+/// Commands surfaced in the autocomplete popup, with a one-line hint each.
+/// Aliases (`/q`, `/?`) stay out of the menu but remain valid to type.
+const COMMAND_CATALOG: &[(&str, &str)] = &[
+    ("/help", "lista os comandos"),
+    ("/theme", "seletor de tema (preview ao vivo)"),
+    ("/model", "troca o modelo do mestre"),
+    ("/config", "mostra a config efetiva"),
+    ("/resume", "retoma sessão anterior"),
+    ("/agents", "roster de agentes (conecta/remove)"),
+    ("/buddy", "bicho de estimação animado"),
+    ("/quit", "sai do rege"),
+];
 
 fn is_known_command(line: &str) -> bool {
     let cmd = line.split_whitespace().next().unwrap_or(line);
@@ -839,7 +1064,36 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             KeyCode::Esc => app.resume_picker_cancel(),
                             _ => {}
                         },
+                        Mode::AgentsPicker { .. } => match key.code {
+                            KeyCode::Up => app.agents_picker_move(-1),
+                            KeyCode::Down => app.agents_picker_move(1),
+                            KeyCode::Enter => app.agents_picker_confirm(),
+                            KeyCode::Char('a') => app.mode = Mode::AgentsAdd { input: String::new() },
+                            KeyCode::Char('x') | KeyCode::Delete => app.agents_picker_remove(),
+                            KeyCode::Esc => app.agents_picker_cancel(),
+                            _ => {}
+                        },
+                        Mode::AgentsAdd { .. } => match key.code {
+                            KeyCode::Char(c) => {
+                                if let Mode::AgentsAdd { input } = &mut app.mode {
+                                    input.push(c);
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                if let Mode::AgentsAdd { input } = &mut app.mode {
+                                    input.pop();
+                                }
+                            }
+                            KeyCode::Enter => app.agents_add_confirm(),
+                            KeyCode::Esc => app.open_agents_picker(),
+                            _ => {}
+                        },
                         Mode::Normal => match key.code {
+                            // Tab / ↑↓ drive the slash-command popup when it's
+                            // open; otherwise they're inert (no history yet).
+                            KeyCode::Tab => app.menu_complete(),
+                            KeyCode::Up => app.menu_move(-1),
+                            KeyCode::Down => app.menu_move(1),
                             KeyCode::Char(c) => app.input_insert(c),
                             KeyCode::Backspace => app.input_backspace(),
                             KeyCode::Delete => app.input_delete(),
@@ -934,6 +1188,15 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
     }
     if let Mode::ResumePicker { cursor } = app.mode {
         draw_resume_picker(area, buf, app, cursor);
+    }
+    if let Mode::AgentsPicker { cursor } = app.mode {
+        draw_agents_picker(area, buf, app, cursor);
+    }
+    if let Mode::AgentsAdd { .. } = &app.mode {
+        draw_agents_add(area, buf, app);
+    }
+    if matches!(app.mode, Mode::Normal) {
+        draw_command_menu(buf, app, app.input_rect);
     }
 
     // Live highlight while dragging a selection, so the user gets feedback
@@ -1388,6 +1651,166 @@ fn draw_resume_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
     Paragraph::new(lines).render(inner, buf);
 }
 
+fn draw_agents_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cursor: usize) {
+    let theme = app.active_theme();
+    let rows = app.agents_rows();
+    let height = rows.len() as u16 + 6;
+    let rect = centered_rect(60, height, area);
+
+    // Clear the popup area so the background chat text doesn't bleed through.
+    Paragraph::new("").render(rect, buf);
+
+    let block = rounded_block(theme, " agentes ", Role::Dim);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(styled(theme, Role::Text, "Roster de agentes").add_modifier(Modifier::BOLD)));
+    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter conecta · a adiciona · x remove · Esc fecha")));
+
+    // Walk the same rows the cursor walks, tracking the selectable index so the
+    // highlighted line matches the cursor exactly.
+    let mut sel = 0usize;
+    for row in &rows {
+        match row {
+            AgentsRow::Header(name) => {
+                lines.push(Line::from(styled(theme, Role::Accent2, name.clone()).add_modifier(Modifier::BOLD)));
+            }
+            AgentsRow::Entry(i) => {
+                let entry = &app.roster[*i];
+                let model = entry.model.as_deref().unwrap_or("(default)");
+                let text = format!("{:<10} {}", entry.role, model);
+                lines.push(agents_line(theme, sel == cursor, &text));
+                sel += 1;
+            }
+            AgentsRow::Connect(cli) => {
+                let text = format!("conectar {cli} (instalado)");
+                lines.push(agents_line(theme, sel == cursor, &text));
+                sel += 1;
+            }
+            AgentsRow::AddManual => {
+                lines.push(agents_line(theme, sel == cursor, "+ adicionar manual"));
+                sel += 1;
+            }
+        }
+    }
+
+    lines.push(Line::from(styled(theme, Role::Dim, "grava em ~/.config/rege/config.yml")));
+    Paragraph::new(lines).render(inner, buf);
+}
+
+/// One selectable line in the agents overlay, with the shared chevron/highlight
+/// styling the other pickers use.
+fn agents_line(theme: &str, selected: bool, text: &str) -> Line<'static> {
+    let chevron =
+        if selected { styled(theme, Role::Accent, "❯ ") } else { styled(theme, Role::Dim, "  ") };
+    let span = if selected {
+        styled(theme, Role::Accent, format!("  {text}")).add_modifier(Modifier::BOLD)
+    } else {
+        styled(theme, Role::Text, format!("  {text}"))
+    };
+    Line::from(vec![chevron, span])
+}
+
+fn draw_agents_add(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
+    let theme = app.active_theme();
+    let input = match &app.mode {
+        Mode::AgentsAdd { input } => input.as_str(),
+        _ => "",
+    };
+    let rect = centered_rect(60, 7, area);
+    Paragraph::new("").render(rect, buf);
+    let block = rounded_block(theme, " novo agente ", Role::Dim);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let lines = vec![
+        Line::from(styled(theme, Role::Text, "Adicionar agente").add_modifier(Modifier::BOLD)),
+        Line::from(styled(theme, Role::Dim, "formato: cli [role] [model] · Enter grava · Esc volta")),
+        Line::from(vec![
+            styled(theme, Role::Accent, "❯ "),
+            styled(theme, Role::Text, input.to_string()),
+            styled(theme, Role::Accent, "▏"),
+        ]),
+        Line::from(styled(theme, Role::Dim, format!("clis: {}", command::KNOWN_CLIS.join(", ")))),
+    ];
+    Paragraph::new(lines).render(inner, buf);
+}
+
+/// Slash-command autocomplete popup, anchored just above the input box. Draws
+/// nothing when the menu is closed (input isn't a bare `/prefix`).
+fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: Rect) {
+    let menu = app.command_menu();
+    if menu.is_empty() || input_rect.width == 0 {
+        return;
+    }
+    let theme = app.active_theme();
+    let height = menu.len() as u16 + 2; // borders
+    // Sit directly above the input; clamp so it never overflows the top edge.
+    let y = input_rect.y.saturating_sub(height);
+    let width = input_rect.width.min(60).max(24);
+    let rect = Rect { x: input_rect.x, y, width, height };
+
+    Paragraph::new("").render(rect, buf);
+    let block = rounded_block(theme, " comandos ", Role::Dim);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let cursor = app.menu_cursor.min(menu.len().saturating_sub(1));
+    let lines: Vec<Line> = menu
+        .iter()
+        .enumerate()
+        .map(|(i, (cmd, desc))| {
+            let selected = i == cursor;
+            let chevron =
+                if selected { styled(theme, Role::Accent, "❯ ") } else { styled(theme, Role::Dim, "  ") };
+            let name = if selected {
+                styled(theme, Role::Accent, format!("{cmd:<10}")).add_modifier(Modifier::BOLD)
+            } else {
+                styled(theme, Role::Text, format!("{cmd:<10}"))
+            };
+            Line::from(vec![chevron, name, styled(theme, Role::Dim, format!(" {desc}"))])
+        })
+        .collect();
+    Paragraph::new(lines).render(inner, buf);
+}
+
+/// True when `cli` is a file on any PATH entry.
+fn cli_installed(cli: &str) -> bool {
+    cli_on_path(cli, std::env::var_os("PATH"))
+}
+
+fn cli_on_path(cli: &str, paths: Option<std::ffi::OsString>) -> bool {
+    let Some(paths) = paths else { return false };
+    std::env::split_paths(&paths).any(|dir| dir.join(cli).is_file())
+}
+
+/// Overwrite the `roster:` key in the global config with the current roster,
+/// preserving every other key (same load-merge-write dance as the theme save).
+fn save_roster_to_config(roster: &[RosterEntry]) -> Result<()> {
+    let path = Config::global_path(&config_home());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut value: serde_yaml::Value = if path.exists() {
+        let text = std::fs::read_to_string(&path)?;
+        if text.trim().is_empty() {
+            serde_yaml::Value::Mapping(Default::default())
+        } else {
+            serde_yaml::from_str(&text)?
+        }
+    } else {
+        serde_yaml::Value::Mapping(Default::default())
+    };
+    if !value.is_mapping() {
+        value = serde_yaml::Value::Mapping(Default::default());
+    }
+    let map = value.as_mapping_mut().expect("just ensured mapping");
+    map.insert(serde_yaml::Value::String("roster".into()), serde_yaml::to_value(roster)?);
+    std::fs::write(&path, serde_yaml::to_string(&value)?)?;
+    Ok(())
+}
+
 use ratatui::widgets::Widget;
 
 #[cfg(test)]
@@ -1619,8 +2042,13 @@ mod tests {
         assert_eq!(extract_selection(&rows, (0, 5), (2, 5)), "");
     }
 
+    /// `TMUX` is process-global env; both osc52 tests mutate it, so serialize
+    /// them to keep the assertions from racing under parallel test execution.
+    static TMUX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn osc52_sequence_wraps_plain_when_no_tmux() {
+        let _guard = TMUX_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("TMUX");
         let seq = osc52_sequence("hi");
         assert!(seq.starts_with("\x1b]52;c;"));
@@ -1630,6 +2058,7 @@ mod tests {
 
     #[test]
     fn osc52_sequence_wraps_tmux_passthrough_when_in_tmux() {
+        let _guard = TMUX_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("TMUX", "/tmp/tmux-1000/default,1234,0");
         let seq = osc52_sequence("hi");
         std::env::remove_var("TMUX");
@@ -1661,5 +2090,136 @@ mod tests {
         app.mouse_down(0, 0);
         app.mouse_up(9, 0);
         assert!(app.flash.is_none());
+    }
+
+    #[test]
+    fn agents_rows_group_by_provider_and_end_with_add_manual() {
+        let config = Config::default();
+        let app = App::new(&config, "/tmp/repo");
+        let rows = app.agents_rows();
+        // Default roster references claude, codex, opencode → a header each.
+        let headers: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                AgentsRow::Header(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(headers.contains(&"claude"));
+        assert!(headers.contains(&"codex"));
+        // Last row is always the manual-add action.
+        assert!(matches!(rows.last(), Some(AgentsRow::AddManual)));
+        // Every Entry under the claude header actually has cli == claude.
+        for r in &rows {
+            if let AgentsRow::Entry(i) = r {
+                assert!(command::KNOWN_CLIS.contains(&app.roster[*i].cli.as_str()));
+            }
+        }
+    }
+
+    #[test]
+    fn agents_selectable_skips_headers() {
+        let config = Config::default();
+        let app = App::new(&config, "/tmp/repo");
+        let rows = app.agents_rows();
+        let headers = rows.iter().filter(|r| matches!(r, AgentsRow::Header(_))).count();
+        assert_eq!(app.agents_selectable().len(), rows.len() - headers);
+        // None of the selectable positions point at a header.
+        for &idx in &app.agents_selectable() {
+            assert!(!matches!(rows[idx], AgentsRow::Header(_)));
+        }
+    }
+
+    #[test]
+    fn agents_picker_move_clamps_to_bounds() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.mode = Mode::AgentsPicker { cursor: 0 };
+        app.agents_picker_move(-5);
+        assert!(matches!(app.mode, Mode::AgentsPicker { cursor: 0 }));
+        app.agents_picker_move(10_000);
+        let last = app.agents_selectable().len() - 1;
+        assert!(matches!(app.mode, Mode::AgentsPicker { cursor } if cursor == last));
+    }
+
+    #[test]
+    fn agents_add_confirm_rejects_unknown_cli() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        let before = app.roster.len();
+        app.mode = Mode::AgentsAdd { input: "notacli worker".into() };
+        // HOME points at a throwaway dir so a valid add wouldn't touch the real
+        // config; here the cli is invalid so nothing is written regardless.
+        app.agents_add_confirm();
+        assert_eq!(app.roster.len(), before, "roster unchanged on unknown cli");
+        assert!(matches!(app.mode, Mode::AgentsPicker { .. }));
+        assert!(app.chat.iter().any(|m| matches!(m.role, ChatRole::Error)));
+    }
+
+    #[test]
+    fn command_menu_filters_by_prefix_and_closes_on_space() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        // Bare slash lists everything.
+        app.input = "/".into();
+        assert_eq!(app.command_menu().len(), COMMAND_CATALOG.len());
+        // Prefix narrows it.
+        app.input = "/co".into();
+        let m = app.command_menu();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].0, "/config");
+        // A space means the command is chosen — popup closes so args can be typed.
+        app.input = "/model ".into();
+        assert!(app.command_menu().is_empty());
+        // Non-slash input never opens the menu.
+        app.input = "faz X".into();
+        assert!(app.command_menu().is_empty());
+    }
+
+    #[test]
+    fn menu_move_wraps_and_complete_fills_input() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.input = "/".into();
+        let n = app.command_menu().len();
+        app.menu_move(-1); // wrap from 0 to last
+        assert_eq!(app.menu_cursor, n - 1);
+        app.menu_move(1); // wrap back to 0
+        assert_eq!(app.menu_cursor, 0);
+        app.menu_complete();
+        assert_eq!(app.input, COMMAND_CATALOG[0].0);
+        assert_eq!(app.input_cursor, app.input.chars().count());
+    }
+
+    #[test]
+    fn menu_complete_is_noop_when_menu_closed() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.input = "faz X".into();
+        app.menu_complete();
+        assert_eq!(app.input, "faz X");
+    }
+
+    #[test]
+    fn typing_resets_menu_cursor() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.input = "/".into();
+        app.menu_move(1);
+        assert_ne!(app.menu_cursor, 0);
+        app.input_insert('h');
+        assert_eq!(app.menu_cursor, 0);
+    }
+
+    #[test]
+    fn cli_on_path_finds_binary_only_when_present() {
+        let dir = std::env::temp_dir().join(format!("rege-clipath-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("mycli"), "#!/bin/sh\n").unwrap();
+        let paths = std::env::join_paths([dir.as_os_str()]).unwrap();
+        assert!(cli_on_path("mycli", Some(paths.clone())));
+        assert!(!cli_on_path("ghostcli", Some(paths)));
+        assert!(!cli_on_path("mycli", None));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

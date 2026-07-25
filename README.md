@@ -47,6 +47,13 @@ cargo install --path .
 
 Isso instala o binário `rege` em `~/.cargo/bin` (garanta que está no seu `PATH`).
 
+Pra atualizar depois, de qualquer diretório:
+
+```bash
+rege update            # puxa e reinstala a última versão do upstream
+rege update --branch x # ou uma branch/tag específica
+```
+
 ## Uso
 
 ```bash
@@ -62,7 +69,9 @@ rege render --demo         # desenha um frame da TUI como texto (headless, sem t
 ### Comandos da TUI
 
 `/help` · `/theme` (seletor com preview) · `/model <nome>` · `/config` · `/resume`
-(sessões anteriores) · `/agents` · `/buddy` (bicho de estimação animado) · `/quit`
+(sessões anteriores) · `/agents` (roster: conecta/remove CLIs, grava no config;
+`/agents ativos` lista os workers rodando) · `/buddy` (bicho de estimação animado) · `/quit`
+Digitar `/` abre um autocomplete com os comandos: `↑↓` navega, `Tab` completa.
 (ou `exit`). Selecionar texto com o mouse copia via OSC52 (funciona por `ssh`/`tmux`
 com passthrough); desliga em `ui.auto_copy`.
 

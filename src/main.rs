@@ -25,6 +25,9 @@ use session::Session;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Upstream oficial usado por `rege update` quando nenhum `--git` é passado.
+const REGE_GIT_URL: &str = "https://github.com/Rafatakitani/rege.git";
+
 #[derive(Parser)]
 #[command(name = "rege", version, about = "Orquestrador multi-agente de IAs")]
 struct Cli {
@@ -51,6 +54,15 @@ enum Cmd {
     },
     /// Abre o claude INTERATIVO ja como orquestrador Rege (playbook + MCP + yolo).
     Claude,
+    /// Atualiza o rege pra última versão (cargo install --git ... --force).
+    Update {
+        /// URL do repositório (default: upstream oficial).
+        #[arg(long, default_value = REGE_GIT_URL)]
+        git: String,
+        /// Branch, tag ou rev específico (default: branch padrão do repo).
+        #[arg(long)]
+        branch: Option<String>,
+    },
     /// Renderiza um frame da TUI como texto (headless, sem tty) pra inspeção/debug.
     Render {
         /// Semeia estado de exemplo (chat + agentes).
@@ -81,6 +93,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
         Some(Cmd::Claude) => claude_orchestrator(&cfg),
+        Some(Cmd::Update { git, branch }) => update(&git, branch.as_deref()),
         Some(Cmd::Render { demo, cols, rows }) => {
             let repo = cwd.to_string_lossy().to_string();
             println!("{}", tui::render_frame(&cfg, &repo, cols, rows, demo));
@@ -169,6 +182,37 @@ fn claude_orchestrator(cfg: &Config) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+/// Self-update: rebuild+reinstall the `rege` binary from git via cargo. No
+/// local checkout needed — cargo clones the repo itself and overwrites the
+/// binary in `~/.cargo/bin`.
+fn update(git: &str, branch: Option<&str>) -> Result<()> {
+    let args = cargo_update_args(git, branch);
+    println!("atualizando rege de {git}{}…", branch.map(|b| format!(" ({b})")).unwrap_or_default());
+    let status = Command::new("cargo").args(&args).status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("✓ rege atualizado. rode `rege --version` pra conferir.");
+            Ok(())
+        }
+        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!("falha ao rodar cargo (instalado? no PATH?): {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The `cargo install` argv for a self-update. Split out so the flag wiring is
+/// unit-testable without shelling out.
+fn cargo_update_args(git: &str, branch: Option<&str>) -> Vec<String> {
+    let mut a = vec!["install".to_string(), "--git".to_string(), git.to_string(), "--force".to_string()];
+    if let Some(b) = branch {
+        a.push("--branch".to_string());
+        a.push(b.to_string());
+    }
+    a
+}
+
 /// Instantiate a Session/Engine for `repo` and serve MCP over stdin/stdout.
 fn mcp_serve(home: &Path, repo: &Path) -> Result<()> {
     let cfg = Config::load(Some(repo), home)?;
@@ -220,4 +264,23 @@ fn is_git_repo(dir: &std::path::Path) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_update_args_defaults_to_forced_git_install() {
+        assert_eq!(
+            cargo_update_args(REGE_GIT_URL, None),
+            vec!["install", "--git", REGE_GIT_URL, "--force"]
+        );
+    }
+
+    #[test]
+    fn cargo_update_args_appends_branch() {
+        let a = cargo_update_args("https://x/y.git", Some("dev"));
+        assert_eq!(a, vec!["install", "--git", "https://x/y.git", "--force", "--branch", "dev"]);
+    }
 }

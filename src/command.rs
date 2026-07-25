@@ -4,6 +4,10 @@
 
 use anyhow::{bail, Result};
 
+/// CLIs the roster knows how to invoke. Anything outside this set has no
+/// `argv` recipe, so the `/agents` picker refuses to connect it.
+pub const KNOWN_CLIS: &[&str] = &["claude", "codex", "gemini", "opencode"];
+
 pub fn argv(cli: &str, task: &str, model: Option<&str>, yolo: bool) -> Result<Vec<String>> {
     let mut a: Vec<String> = Vec::new();
     match cli {
