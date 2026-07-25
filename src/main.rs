@@ -62,6 +62,9 @@ enum Cmd {
         /// Branch, tag ou rev específico (default: branch padrão do repo).
         #[arg(long)]
         branch: Option<String>,
+        /// Mostra o output cru do cargo (compilação linha a linha).
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Renderiza um frame da TUI como texto (headless, sem tty) pra inspeção/debug.
     Render {
@@ -93,7 +96,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
         Some(Cmd::Claude) => claude_orchestrator(&cfg),
-        Some(Cmd::Update { git, branch }) => update(&git, branch.as_deref()),
+        Some(Cmd::Update { git, branch, verbose }) => update(&git, branch.as_deref(), verbose),
         Some(Cmd::Render { demo, cols, rows }) => {
             let repo = cwd.to_string_lossy().to_string();
             println!("{}", tui::render_frame(&cfg, &repo, cols, rows, demo));
@@ -185,30 +188,64 @@ fn claude_orchestrator(cfg: &Config) -> Result<()> {
 /// Self-update: rebuild+reinstall the `rege` binary from git via cargo. No
 /// local checkout needed — cargo clones the repo itself and overwrites the
 /// binary in `~/.cargo/bin`.
-fn update(git: &str, branch: Option<&str>) -> Result<()> {
-    let args = cargo_update_args(git, branch);
-    println!("atualizando rege de {git}{}…", branch.map(|b| format!(" ({b})")).unwrap_or_default());
-    let status = Command::new("cargo").args(&args).status();
-    match status {
-        Ok(s) if s.success() => {
-            println!("✓ rege atualizado. rode `rege --version` pra conferir.");
+fn update(git: &str, branch: Option<&str>, verbose: bool) -> Result<()> {
+    let args = cargo_update_args(git, branch, verbose);
+    let which = branch.map(|b| format!(" ({b})")).unwrap_or_default();
+    println!("atualizando rege{which}… (compilando, ~1min)");
+
+    // Quiet by default: 90 lines of `Compiling foo v1.2.3` say nothing. The
+    // output is captured, not discarded, so a failure still shows why.
+    if verbose {
+        return match Command::new("cargo").args(&args).status() {
+            Ok(s) if s.success() => {
+                println!("✓ rege atualizado. `rege --version` pra conferir.");
+                Ok(())
+            }
+            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+            Err(e) => cargo_missing(e),
+        };
+    }
+    match Command::new("cargo").args(&args).output() {
+        Ok(o) if o.status.success() => {
+            println!("✓ rege atualizado. `rege --version` pra conferir.");
             Ok(())
         }
-        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
-        Err(e) => {
-            eprintln!("falha ao rodar cargo (instalado? no PATH?): {e}");
-            std::process::exit(1);
+        Ok(o) => {
+            eprint!("{}", tail_lines(&String::from_utf8_lossy(&o.stderr), 20));
+            eprintln!("falha ao atualizar. `rege update --verbose` pro output completo.");
+            std::process::exit(o.status.code().unwrap_or(1));
         }
+        Err(e) => cargo_missing(e),
     }
+}
+
+fn cargo_missing(e: std::io::Error) -> ! {
+    eprintln!("falha ao rodar cargo (instalado? no PATH?): {e}");
+    std::process::exit(1);
+}
+
+/// Last `n` lines — cargo puts the actual error at the end, after the wall of
+/// `Compiling` noise.
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    let mut out = lines[start..].join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 /// The `cargo install` argv for a self-update. Split out so the flag wiring is
 /// unit-testable without shelling out.
-fn cargo_update_args(git: &str, branch: Option<&str>) -> Vec<String> {
+fn cargo_update_args(git: &str, branch: Option<&str>, verbose: bool) -> Vec<String> {
     let mut a = vec!["install".to_string(), "--git".to_string(), git.to_string(), "--force".to_string()];
     if let Some(b) = branch {
         a.push("--branch".to_string());
         a.push(b.to_string());
+    }
+    if !verbose {
+        a.push("--quiet".to_string());
     }
     a
 }
@@ -271,16 +308,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cargo_update_args_defaults_to_forced_git_install() {
+    fn cargo_update_args_defaults_to_forced_quiet_git_install() {
         assert_eq!(
-            cargo_update_args(REGE_GIT_URL, None),
-            vec!["install", "--git", REGE_GIT_URL, "--force"]
+            cargo_update_args(REGE_GIT_URL, None, false),
+            vec!["install", "--git", REGE_GIT_URL, "--force", "--quiet"]
         );
     }
 
     #[test]
     fn cargo_update_args_appends_branch() {
-        let a = cargo_update_args("https://x/y.git", Some("dev"));
-        assert_eq!(a, vec!["install", "--git", "https://x/y.git", "--force", "--branch", "dev"]);
+        let a = cargo_update_args("https://x/y.git", Some("dev"), false);
+        assert_eq!(
+            a,
+            vec!["install", "--git", "https://x/y.git", "--force", "--branch", "dev", "--quiet"]
+        );
+    }
+
+    #[test]
+    fn cargo_update_args_verbose_drops_quiet() {
+        let a = cargo_update_args("https://x/y.git", None, true);
+        assert_eq!(a, vec!["install", "--git", "https://x/y.git", "--force"]);
+    }
+
+    #[test]
+    fn tail_lines_keeps_the_end_where_cargo_puts_the_error() {
+        let text = "Compiling a\nCompiling b\nerror: boom\n";
+        assert_eq!(tail_lines(text, 2), "Compiling b\nerror: boom\n");
+        // Shorter than the window: everything, unchanged.
+        assert_eq!(tail_lines("só isso\n", 20), "só isso\n");
+        assert_eq!(tail_lines("", 20), "");
     }
 }
