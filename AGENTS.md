@@ -68,7 +68,15 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 
 ## Trabalhando NESTE repositório (rege em si)
 
-- Rust. `cargo test` (174 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- Rust. `cargo test` (178 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- **`Cargo.lock` é versionado** e o `rege update` instala com `--locked`. Sem ele
+  o `cargo install --git` re-resolve as 94 dependências e atualiza o índice do
+  crates.io a cada update, instalando versões que ninguém testou. Commite o lock
+  junto com o bump de versão.
+- **`update` compila com o perfil `fastinstall`** (opt-level 1), não com o
+  `release`. O que se otimiza ali é o tempo de build; o binário é IO-bound. Se o
+  commit for velho demais pros flags, o `update` repete sem eles em vez de
+  quebrar — mas isso custa dois builds, então não tire o perfil nem o lock.
 - **Versão**: `version` no `Cargo.toml` sobe em todo PR que muda comportamento —
   senão `rege --version` não distingue builds e ninguém sabe se o `update` pegou.
   O `build.rs` estampa o commit por cima (`rege 0.2.0 (b178154)`); o hash é
