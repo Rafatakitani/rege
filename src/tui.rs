@@ -24,7 +24,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::io::Stdout;
 use std::path::PathBuf;
@@ -586,7 +586,7 @@ impl App {
     /// Slash-command matches for the autocomplete popup: non-empty only while
     /// the input is a bare `/prefix` (leading `/`, no space yet). Empty means
     /// the popup is closed.
-    fn command_menu(&self) -> Vec<(&'static str, &'static str)> {
+    fn command_menu(&self) -> Vec<&'static CommandDoc> {
         // Recalling `/help` from history shouldn't reopen the popup — ↑↓ have
         // to keep meaning "walk the history" until the user types again.
         if self.history_idx.is_some() {
@@ -596,7 +596,7 @@ impl App {
         if !inp.starts_with('/') || inp.chars().any(char::is_whitespace) {
             return Vec::new();
         }
-        COMMAND_CATALOG.iter().filter(|(cmd, _)| cmd.starts_with(inp)).copied().collect()
+        COMMAND_CATALOG.iter().filter(|d| d.cmd.starts_with(inp)).collect()
     }
 
     fn menu_open(&self) -> bool {
@@ -622,8 +622,8 @@ impl App {
     /// is closed, so Tab stays inert during normal typing.
     fn menu_complete(&mut self) {
         let menu = self.command_menu();
-        if let Some((cmd, _)) = menu.get(self.menu_selected(menu.len())) {
-            self.input = cmd.to_string();
+        if let Some(doc) = menu.get(self.menu_selected(menu.len())) {
+            self.input = doc.cmd.to_string();
             self.input_cursor = self.input.chars().count();
             self.menu_cursor = 0;
         }
@@ -751,7 +751,7 @@ impl App {
     /// so a command that opens its own overlay isn't immediately overwritten.
     fn help_picker_confirm(&mut self) {
         let cmd = match self.mode {
-            Mode::HelpPicker { cursor } => COMMAND_CATALOG.get(cursor).map(|(c, _)| *c),
+            Mode::HelpPicker { cursor } => COMMAND_CATALOG.get(cursor).map(|d| d.cmd),
             _ => None,
         };
         self.mode = Mode::Normal;
@@ -979,18 +979,127 @@ impl App {
 const KNOWN_COMMANDS: &[&str] =
     &["/quit", "/q", "/help", "/?", "/model", "/config", "/theme", "/resume", "/agents", "/buddy", "/scan"];
 
-/// Commands surfaced in the autocomplete popup, with a one-line hint each.
+/// A command as documentation, not just a label. `/help` teaches from `body`:
+/// what the command does, and where it sits in how rege works — a one-line hint
+/// can name a command but can't explain the tool.
+struct CommandDoc {
+    cmd: &'static str,
+    /// One line, for the autocomplete popup where there's no room for more.
+    hint: &'static str,
+    body: &'static [&'static str],
+    examples: &'static [&'static str],
+}
+
+/// Commands surfaced in the autocomplete popup and in `/help`.
 /// Aliases (`/q`, `/?`) stay out of the menu but remain valid to type.
-const COMMAND_CATALOG: &[(&str, &str)] = &[
-    ("/help", "lista os comandos"),
-    ("/theme", "seletor de tema (preview ao vivo)"),
-    ("/model", "troca o modelo do mestre"),
-    ("/config", "mostra a config efetiva"),
-    ("/resume", "retoma sessão anterior"),
-    ("/agents", "roster de agentes (conecta/remove)"),
-    ("/scan", "escaneia o diretório e escreve o AGENTS.md"),
-    ("/buddy", "bicho de estimação animado"),
-    ("/quit", "sai do rege"),
+const COMMAND_CATALOG: &[CommandDoc] = &[
+    CommandDoc {
+        cmd: "/help",
+        hint: "lista os comandos",
+        body: &[
+            "Esta tela. ↑↓ percorre os comandos e explica cada um aqui embaixo; \
+             Enter executa o que estiver destacado.",
+            "Se você é novo no rege: você conversa com o MESTRE. Ele não escreve \
+             código — ele avalia a tarefa e delega pra workers, cada um num git \
+             worktree isolado. Depois revisa e abre um PR.",
+            "O mestre nunca faz merge. A saída final é sempre um PR pra você aprovar.",
+        ],
+        examples: &["/help", "/? (mesma coisa)"],
+    },
+    CommandDoc {
+        cmd: "/theme",
+        hint: "seletor de tema (preview ao vivo)",
+        body: &[
+            "Troca a paleta de cores da interface. Sem argumento abre o seletor, \
+             onde o cursor dá preview ao vivo: a tela inteira muda enquanto você \
+             navega, então dá pra escolher olhando em vez de adivinhar pelo nome.",
+            "Com o nome direto, aplica sem abrir nada.",
+        ],
+        examples: &["/theme", "/theme luxury"],
+    },
+    CommandDoc {
+        cmd: "/model",
+        hint: "troca o modelo do mestre",
+        body: &[
+            "Troca o modelo que o MESTRE usa — não o dos workers, que vêm do roster \
+             em /agents.",
+            "Vale escalar aqui quando a tarefa é de decisão difícil (arquitetura, \
+             triagem de algo ambíguo) e economizar quando é rotina. Modelo caro no \
+             mestre com workers baratos é a combinação usual.",
+        ],
+        examples: &["/model", "/model opus", "/model sonnet"],
+    },
+    CommandDoc {
+        cmd: "/config",
+        hint: "mostra a config efetiva",
+        body: &[
+            "Mostra o que está valendo AGORA, já resolvido: mestre, tema, auto_copy, \
+             repo e onde as sessões são gravadas.",
+            "É a config efetiva, depois de juntar as camadas — ~/.config/rege/config.yml \
+             e o .rege.yml do projeto, que tem a última palavra. Se algo não parece \
+             estar pegando, olhe aqui antes de editar arquivo.",
+        ],
+        examples: &["/config"],
+    },
+    CommandDoc {
+        cmd: "/resume",
+        hint: "retoma sessão anterior",
+        body: &[
+            "Lista as conversas anteriores deste repo e retoma a escolhida, com o \
+             contexto de onde você parou.",
+            "Útil quando o trabalho atravessa dias: em vez de reexplicar a tarefa, \
+             você continua de onde estava.",
+        ],
+        examples: &["/resume"],
+    },
+    CommandDoc {
+        cmd: "/agents",
+        hint: "roster de agentes (conecta/remove)",
+        body: &[
+            "Seu roster: quais CLIs de IA o mestre pode usar como workers, e em que \
+             papel. Enter conecta um CLI que está instalado mas fora do roster; \
+             x remove; a adiciona um à mão.",
+            "É daqui que os workers saem. Quando o mestre delega, ele escolhe entre \
+             estes — cada um roda isolado num git worktree, em sessão tmux própria, \
+             sem tocar na sua branch.",
+            "Grava em ~/.config/rege/config.yml. `/agents ativos` mostra quem está \
+             rodando agora.",
+        ],
+        examples: &["/agents", "/agents ativos"],
+    },
+    CommandDoc {
+        cmd: "/scan",
+        hint: "escaneia o diretório e escreve o AGENTS.md",
+        body: &[
+            "Olha o diretório e escreve um AGENTS.md descrevendo ele: o que é, como \
+             rodar e testar, estrutura, convenções.",
+            "AGENTS.md é a convenção que claude, codex e afins leem sozinhos — então \
+             o arquivo ajuda qualquer agente que trabalhe aqui, não só o rege.",
+            "Nunca sobrescreve um AGENTS.md existente sem --force. É oferecido uma \
+             vez por diretório na primeira vez que você abre o rege nele.",
+        ],
+        examples: &["/scan", "/scan --force"],
+    },
+    CommandDoc {
+        cmd: "/buddy",
+        hint: "bicho de estimação animado",
+        body: &[
+            "Choca um bichinho no canto da tela, com aparência derivada do seu \
+             usuário — o mesmo usuário sempre choca o mesmo bicho.",
+            "Não faz nada de útil. `/buddy pet` faz carinho.",
+        ],
+        examples: &["/buddy", "/buddy pet"],
+    },
+    CommandDoc {
+        cmd: "/quit",
+        hint: "sai do rege",
+        body: &[
+            "Fecha a TUI. A sessão fica gravada, então /resume traz ela de volta.",
+            "Workers já disparados seguem nas sessões tmux deles — sair da TUI não \
+             mata o trabalho em andamento.",
+        ],
+        examples: &["/quit", "/q · exit · :q"],
+    },
 ];
 
 fn is_known_command(line: &str) -> bool {
@@ -2066,26 +2175,66 @@ fn draw_agents_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
     Paragraph::new(lines).render(inner, buf);
 }
 
-/// `/help` as a picker rather than a printed list: Enter runs what's
-/// highlighted, so the commands are reachable from here instead of having to be
-/// read and retyped.
+/// `/help` teaches instead of listing: the highlighted command gets explained
+/// right below the list, so the tool is learned by walking it. Enter still runs
+/// what's highlighted, so reading and doing are the same screen.
 fn draw_help_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cursor: usize) {
     let theme = app.active_theme();
-    let rect = centered_rect(64, COMMAND_CATALOG.len() as u16 + 6, area);
+    let list_height = COMMAND_CATALOG.len() as u16 + 2; // + title and hint rows
+    const WIDTH: u16 = 72;
+    // Sized by the *longest* explanation, not the current one, so the panel
+    // doesn't grow and shrink under the cursor while you read.
+    let doc_height = COMMAND_CATALOG.iter().map(|d| doc_height(d, WIDTH - 2)).max().unwrap_or(6);
+    // +2 for the block's own borders, which don't belong to the inner layout.
+    let rect = centered_rect(WIDTH, (list_height + doc_height + 2).min(area.height), area);
     Clear.render(rect, buf);
 
-    let block = rounded_block(theme, " comandos ", Role::Accent);
+    let block = rounded_block(theme, " ajuda ", Role::Accent);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
+    let [list_area, doc_area] =
+        Layout::vertical([Constraint::Length(list_height), Constraint::Min(1)]).areas(inner);
+
     let mut lines = vec![
         Line::from(styled(theme, Role::Text, "Comandos").add_modifier(Modifier::BOLD)),
-        Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter executa · Esc fecha")),
+        Line::from(styled(theme, Role::Dim, "↑↓ explica · Enter executa · Esc fecha")),
     ];
-    for (i, (cmd, hint)) in COMMAND_CATALOG.iter().enumerate() {
-        lines.push(agents_line(theme, i == cursor, &format!("{cmd:<10} {hint}")));
+    for (i, doc) in COMMAND_CATALOG.iter().enumerate() {
+        lines.push(agents_line(theme, i == cursor, &format!("{:<10} {}", doc.cmd, doc.hint)));
     }
-    Paragraph::new(lines).render(inner, buf);
+    Paragraph::new(lines).render(list_area, buf);
+
+    if let Some(doc) = COMMAND_CATALOG.get(cursor) {
+        draw_command_doc(doc_area, buf, theme, doc);
+    }
+}
+
+/// Rows `doc` needs at `width`, counting the wrap — the panel is sized from
+/// this so nothing gets clipped, least of all the examples at the bottom.
+fn doc_height(doc: &CommandDoc, width: u16) -> u16 {
+    let w = width.max(1) as usize;
+    let wrapped: usize = doc.body.iter().map(|p| p.chars().count().div_ceil(w) + 1).sum();
+    // rule + body + examples
+    1 + wrapped as u16 + if doc.examples.is_empty() { 0 } else { 1 }
+}
+
+/// The explanation half of `/help`. Wrapped, because these are paragraphs — the
+/// point is to say what the command is *for*, not to fit in a column.
+fn draw_command_doc(area: Rect, buf: &mut ratatui::buffer::Buffer, theme: &str, doc: &CommandDoc) {
+    let rule = "─".repeat(area.width.saturating_sub(doc.cmd.len() as u16 + 2).max(1) as usize);
+    let mut lines = vec![Line::from(vec![
+        styled(theme, Role::Accent2, format!("{} ", doc.cmd)).add_modifier(Modifier::BOLD),
+        styled(theme, Role::Dim, rule),
+    ])];
+    for para in doc.body {
+        lines.push(Line::from(styled(theme, Role::Text, *para)));
+        lines.push(Line::from(""));
+    }
+    if !doc.examples.is_empty() {
+        lines.push(Line::from(styled(theme, Role::Dim, format!("ex: {}", doc.examples.join("  ·  ")))));
+    }
+    Paragraph::new(lines).wrap(Wrap { trim: true }).render(area, buf);
 }
 
 /// Master model as a typed field. A fixed model list would be a guess that goes
@@ -2225,7 +2374,8 @@ fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: R
     let lines: Vec<Line> = menu
         .iter()
         .enumerate()
-        .map(|(i, (cmd, desc))| {
+        .map(|(i, doc)| {
+            let (cmd, desc) = (doc.cmd, doc.hint);
             let selected = i == cursor;
             let chevron =
                 if selected { styled(theme, Role::Accent, "❯ ") } else { styled(theme, Role::Dim, "  ") };
@@ -2365,8 +2515,25 @@ mod tests {
             assert!(painted.iter().any(|l| l.contains(cmd)), "{cmd} devia estar no painel");
         }
 
+        // The highlighted command gets explained, not just labeled — /help has
+        // to teach the tool, and a one-line hint can't.
+        let agents_idx = COMMAND_CATALOG.iter().position(|d| d.cmd == "/agents").unwrap();
+        app.mode = Mode::HelpPicker { cursor: agents_idx };
+        let doc = render_to_lines(&mut app, 90, 34).join(" ");
+        assert!(doc.contains("worktree"), "explicação do /agents devia situar o worker: {doc}");
+        assert!(doc.contains("ex:"), "exemplos de uso no painel");
+
+        // Every command carries real documentation, so no entry can rot into a
+        // bare label as the catalog grows.
+        for d in COMMAND_CATALOG {
+            assert!(!d.body.is_empty(), "{} sem explicação", d.cmd);
+            assert!(!d.examples.is_empty(), "{} sem exemplo", d.cmd);
+            assert!(d.body[0].len() > 40, "{}: explicação curta demais pra ensinar algo", d.cmd);
+        }
+
         // Enter runs what's highlighted — walk to /theme and confirm it opens.
-        let theme_idx = COMMAND_CATALOG.iter().position(|(c, _)| *c == "/theme").unwrap();
+        app.mode = Mode::HelpPicker { cursor: 0 };
+        let theme_idx = COMMAND_CATALOG.iter().position(|d| d.cmd == "/theme").unwrap();
         for _ in 0..theme_idx {
             app.help_picker_move(1);
         }
@@ -2697,7 +2864,7 @@ mod tests {
         app.input = "/co".into();
         let m = app.command_menu();
         assert_eq!(m.len(), 1);
-        assert_eq!(m[0].0, "/config");
+        assert_eq!(m[0].cmd, "/config");
         // A space means the command is chosen — popup closes so args can be typed.
         app.input = "/model ".into();
         assert!(app.command_menu().is_empty());
@@ -2717,7 +2884,7 @@ mod tests {
         app.menu_move(1); // wrap back to 0
         assert_eq!(app.menu_cursor, 0);
         app.menu_complete();
-        assert_eq!(app.input, COMMAND_CATALOG[0].0);
+        assert_eq!(app.input, COMMAND_CATALOG[0].cmd);
         assert_eq!(app.input_cursor, app.input.chars().count());
     }
 
@@ -2729,7 +2896,7 @@ mod tests {
         // Enter must take that row, not the lone slash under the caret.
         app.input = "/".into();
         app.menu_move(2);
-        let expected = app.command_menu()[2].0;
+        let expected = app.command_menu()[2].cmd;
         assert!(app.menu_accept());
         assert_eq!(app.input, expected);
     }
