@@ -195,6 +195,9 @@ struct App {
     chat_rows: usize,
     /// Total wrapped rows the conversation currently occupies.
     chat_total: usize,
+    /// Screen row where the chat pane starts, so a drag knows when it has hit
+    /// the top edge and should scroll instead of stopping.
+    chat_top: u16,
     /// When the running turn started, for the activity line. `None` = idle.
     turn_started: Option<Instant>,
     /// Characters streamed back this turn, the basis for the token estimate.
@@ -254,6 +257,7 @@ impl App {
             scroll: 0,
             chat_rows: 0,
             chat_total: 0,
+            chat_top: 0,
             turn_started: None,
             turn_chars: 0,
             spinner: 0,
@@ -605,8 +609,16 @@ impl App {
     }
 
     fn mouse_drag(&mut self, col: u16, row: u16) {
-        if self.selection_start.is_some() {
-            self.selection_end = Some((col, row));
+        if self.selection_start.is_none() {
+            return;
+        }
+        self.selection_end = Some((col, row));
+        // Dragging against the top edge scrolls, so a selection can reach text
+        // that's above the viewport instead of stopping at the first row shown.
+        if row <= self.chat_top {
+            self.scroll_by(1);
+        } else if row >= self.chat_top + self.chat_rows as u16 {
+            self.scroll_by(-1);
         }
     }
 
@@ -1209,8 +1221,23 @@ fn extract_selection(row_text: &[String], start: (u16, u16), end: (u16, u16)) ->
         let hi = ((c1 as usize) + 1).min(chars.len()).max(lo);
         chars[lo..hi].iter().collect::<String>().trim_end().to_string()
     } else {
+        // Mirror what `highlight_selection` paints: the first row starts at the
+        // click column, the last one ends at the release column. Taking whole
+        // rows here made the copy disagree with the highlight — starting a
+        // selection mid-line and dragging up grabbed the line from its start.
         (r0..=r1)
-            .map(|r| row_text.get(r as usize).map(|s| s.trim_end().to_string()).unwrap_or_default())
+            .map(|r| {
+                let row = row_text.get(r as usize).map(String::as_str).unwrap_or("");
+                let chars: Vec<char> = row.chars().collect();
+                let (lo, hi) = if r == r0 {
+                    ((c0 as usize).min(chars.len()), chars.len())
+                } else if r == r1 {
+                    (0, ((c1 as usize) + 1).min(chars.len()))
+                } else {
+                    (0, chars.len())
+                };
+                chars[lo..hi.max(lo)].iter().collect::<String>().trim_end().to_string()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1700,6 +1727,7 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
     let (rows, total) = chat_metrics(chunks[1], app, theme);
     app.chat_rows = rows;
     app.chat_total = total;
+    app.chat_top = chunks[1].y;
     draw_chat(chunks[1], buf, app, theme);
     draw_agents(chunks[2], buf, app, theme);
     draw_input(chunks[3], buf, app, theme);
@@ -1975,9 +2003,23 @@ fn first_bit(s: &str, max: usize) -> String {
 /// One chat message → its display rows: text is split on embedded `\n` and each
 /// segment hard-wrapped to `width`, with continuation rows indented under the
 /// role glyph so the left gutter stays aligned.
+/// The user's own lines get a filled band across the pane, the way a shell
+/// echoes what you typed: `❯` alone put user and assistant one glyph apart, and
+/// scrolling back through a long conversation they blurred together.
+fn user_row_colors(theme: &str) -> ((u8, u8, u8), (u8, u8, u8)) {
+    let d = theme::color(theme, Role::Dim);
+    // Dim itself is too loud as a fill — darken it so the band reads as a
+    // surface behind the text, not as a highlight competing with it.
+    let bg = ((d.0 as f32 * 0.45) as u8, (d.1 as f32 * 0.45) as u8, (d.2 as f32 * 0.45) as u8);
+    (bg, theme::color(theme, Role::Text))
+}
+
 fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
+    if matches!(m.role, ChatRole::User) {
+        return user_lines(theme, &m.text, width);
+    }
     let (prefix, prefix_role, body_role) = match m.role {
-        ChatRole::User => ("❯ ", Role::Accent, Role::Text),
+        ChatRole::User => unreachable!("tratado acima"),
         ChatRole::Assistant => ("● ", Role::Accent, Role::Text),
         ChatRole::Tool => ("  ⚙ ", Role::Dim, Role::Dim),
         ChatRole::Info => ("", Role::Dim, Role::Dim),
@@ -1991,16 +2033,84 @@ fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
         .enumerate()
         .map(|(i, seg)| {
             let gutter = if i == 0 { prefix.to_string() } else { indent.clone() };
+            let body = markdown_spans(theme, &seg, body_role);
             if gutter.is_empty() {
-                Line::from(styled(theme, body_role, seg))
+                Line::from(body)
             } else {
-                Line::from(vec![
-                    styled(theme, prefix_role, gutter),
-                    styled(theme, body_role, seg),
-                ])
+                let mut spans = vec![styled(theme, prefix_role, gutter)];
+                spans.extend(body);
+                Line::from(spans)
             }
         })
         .collect()
+}
+
+/// A user message as a filled band: every row padded to the full width so the
+/// background is a solid block, not a ragged one that ends with the text.
+fn user_lines(theme: &str, text: &str, width: u16) -> Vec<Line<'static>> {
+    let (bg, fg) = user_row_colors(theme);
+    let style = Style::default().bg(rgb(bg)).fg(rgb(fg));
+    let cols = width as usize;
+    let budget = cols.saturating_sub(2).max(1); // "❯ "
+    wrap_text(text, budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            let gutter = if i == 0 { "❯ " } else { "  " };
+            let used = gutter.chars().count() + seg.chars().count();
+            let pad = " ".repeat(cols.saturating_sub(used));
+            Line::from(Span::styled(format!("{gutter}{seg}{pad}"), style))
+        })
+        .collect()
+}
+
+/// Turns the markdown the master actually emits into styled spans. Not a
+/// markdown engine: only the marks that showed up as literal noise on screen —
+/// `**bold**`, `` `code` `` and `###` headings. Anything else stays as typed,
+/// which is the honest outcome for a renderer this small.
+fn markdown_spans(theme: &str, line: &str, body_role: Role) -> Vec<Span<'static>> {
+    // A heading colors the whole line and drops the hashes.
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        let text = trimmed.trim_start_matches('#').trim_start();
+        if !text.is_empty() {
+            return vec![styled(theme, Role::Accent2, text.to_string()).add_modifier(Modifier::BOLD)];
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut rest = line;
+    let mut plain = String::new();
+    while !rest.is_empty() {
+        let bold = rest.find("**").filter(|i| rest[i + 2..].contains("**"));
+        let code = rest.find('`').filter(|i| rest[i + 1..].contains('`'));
+        // Whichever mark opens first wins; ties can't happen (different chars).
+        let (at, close, len, role, bolded) = match (bold, code) {
+            (Some(b), Some(c)) if b < c => (b, "**", 2, Role::Text, true),
+            (Some(_), Some(c)) => (c, "`", 1, Role::Accent, false),
+            (Some(b), None) => (b, "**", 2, Role::Text, true),
+            (None, Some(c)) => (c, "`", 1, Role::Accent, false),
+            (None, None) => break,
+        };
+        plain.push_str(&rest[..at]);
+        let after = &rest[at + len..];
+        let Some(end) = after.find(close) else { break };
+        if !plain.is_empty() {
+            spans.push(styled(theme, body_role, std::mem::take(&mut plain)));
+        }
+        let inner = after[..end].to_string();
+        let span = styled(theme, role, inner);
+        spans.push(if bolded { span.add_modifier(Modifier::BOLD) } else { span });
+        rest = &after[end + len..];
+    }
+    plain.push_str(rest);
+    if !plain.is_empty() {
+        spans.push(styled(theme, body_role, plain));
+    }
+    if spans.is_empty() {
+        spans.push(styled(theme, body_role, String::new()));
+    }
+    spans
 }
 
 /// Splits on `\n`, then hard-wraps each line to `width` chars. Blank lines are
@@ -2016,9 +2126,22 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         }
         let mut i = 0;
         while i < chars.len() {
-            let end = (i + width).min(chars.len());
-            out.push(chars[i..end].iter().collect());
-            i = end;
+            let hard = (i + width).min(chars.len());
+            // Break on the last space that fits, so words stay whole ("nesse
+            // mo|mento" was the tell). A word longer than the line still gets
+            // cut — there's nowhere else to break it.
+            let end = if hard == chars.len() {
+                hard
+            } else {
+                match chars[i..hard].iter().rposition(|c| *c == ' ') {
+                    Some(rel) if rel > 0 => i + rel,
+                    _ => hard,
+                }
+            };
+            out.push(chars[i..end].iter().collect::<String>().trim_end().to_string());
+            // Swallow the space we broke on; leading spaces would misalign the
+            // continuation against the gutter.
+            i = if end < chars.len() && chars[end] == ' ' { end + 1 } else { end };
         }
     }
     if out.is_empty() {
@@ -2912,9 +3035,22 @@ mod tests {
     }
 
     #[test]
-    fn extract_selection_multi_row_joins_whole_lines_trimmed() {
+    fn extract_selection_multi_row_respects_the_click_columns() {
+        // First row starts where the drag started, last row ends where it
+        // ended, middle rows come whole — same shape the highlight paints.
         let rows = vec!["first   ".to_string(), "second".to_string(), "third  ".to_string()];
-        assert_eq!(extract_selection(&rows, (2, 0), (3, 2)), "first\nsecond\nthird");
+        assert_eq!(extract_selection(&rows, (2, 0), (3, 2)), "rst\nsecond\nthir");
+    }
+
+    #[test]
+    fn selection_dragged_upward_starts_where_the_click_was() {
+        // The reported bug: click mid-line on "localhost" and drag up, and the
+        // copy came back with that line from its very beginning.
+        let rows = vec!["acima da selecao".to_string(), "roda localhost pra testar".to_string()];
+        let clique = (5, 1); // on "localhost"
+        let solta = (6, 0); // dragged up into the row above
+        // Normalized: from (6,0) down to (5,1) — row 0 from col 6, row 1 up to col 5.
+        assert_eq!(extract_selection(&rows, clique, solta), "da selecao\nroda l");
     }
 
     #[test]
@@ -3134,6 +3270,79 @@ mod tests {
         let row = painted2.iter().find(|l| l.contains("sim, escanear")).expect("linha do overlay");
         assert!(!row.contains("agentes"), "painel de agentes vazando: {row}");
         assert!(!row.contains('─'), "borda de outro painel vazando: {row}");
+    }
+
+    #[test]
+    fn markdown_marks_render_instead_of_showing_as_literal_noise() {
+        let t = theme::DEFAULT;
+        let junta = |spans: Vec<Span<'static>>| -> String { spans.iter().map(|s| s.content.to_string()).collect() };
+
+        let b = markdown_spans(t, "vem **forte** aqui", Role::Text);
+        assert_eq!(junta(b.clone()), "vem forte aqui", "as estrelas somem do texto");
+        assert!(b.iter().any(|s| s.content == "forte" && s.style.add_modifier.contains(Modifier::BOLD)));
+
+        let c = markdown_spans(t, "roda `bin/dev` agora", Role::Text);
+        assert_eq!(junta(c.clone()), "roda bin/dev agora");
+        assert!(c.iter().any(|s| s.content == "bin/dev"), "código vira span próprio");
+
+        let h = markdown_spans(t, "### 4. Modelos", Role::Text);
+        assert_eq!(junta(h.clone()), "4. Modelos", "os # somem");
+        assert!(h[0].style.add_modifier.contains(Modifier::BOLD));
+
+        // Unpaired marks stay literal rather than eating the rest of the line.
+        assert_eq!(junta(markdown_spans(t, "2 ** 3 = 8", Role::Text)), "2 ** 3 = 8");
+        assert_eq!(junta(markdown_spans(t, "crase ` solta", Role::Text)), "crase ` solta");
+    }
+
+    #[test]
+    fn wrap_breaks_on_spaces_instead_of_mid_word() {
+        let linhas = wrap_text("nesse momento a conversao melhora", 20);
+        assert!(linhas.iter().all(|l| l.len() <= 20));
+        for l in &linhas {
+            assert!(!l.ends_with(' '), "sem espaço sobrando na quebra: {l:?}");
+        }
+        assert_eq!(linhas.join(" "), "nesse momento a conversao melhora", "nada se perde nem se duplica");
+
+        // A single word longer than the line has nowhere to break — still cut.
+        let gigante = wrap_text("supercalifragilistico", 8);
+        assert_eq!(gigante, vec!["supercal", "ifragili", "stico"]);
+    }
+
+    #[test]
+    fn user_messages_get_a_filled_band_and_assistant_ones_do_not() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.push(ChatRole::User, "sobe o servidor");
+        app.push(ChatRole::Assistant, "rodando em localhost:3000");
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        draw(area, &mut buf, &mut app);
+
+        let fundo_da_linha = |texto: &str| -> Option<Vec<ratatui::style::Color>> {
+            (0..area.height).find_map(|row| {
+                let linha: String = (0..area.width)
+                    .map(|c| buf.cell((c, row)).unwrap().symbol().to_string())
+                    .collect();
+                linha.contains(texto).then(|| {
+                    (0..area.width).map(|c| buf.cell((c, row)).unwrap().bg).collect()
+                })
+            })
+        };
+        let (bg, _) = user_row_colors(theme::DEFAULT);
+        let user = fundo_da_linha("sobe o servidor").expect("linha do usuário");
+        let assistant = fundo_da_linha("rodando em localhost").expect("linha do mestre");
+
+        assert!(user.iter().filter(|c| **c == rgb(bg)).count() > 40, "faixa preenchida na fala do usuário");
+        assert!(!assistant.iter().any(|c| *c == rgb(bg)), "a fala do mestre não leva faixa");
+    }
+
+    #[test]
+    fn the_user_band_stays_readable_on_every_theme() {
+        for name in theme::names() {
+            let (bg, fg) = user_row_colors(name);
+            let luma = |c: (u8, u8, u8)| (c.0 as i32 * 299 + c.1 as i32 * 587 + c.2 as i32 * 114) / 1000;
+            assert!((luma(fg) - luma(bg)).abs() > 70, "{name}: texto do usuário sem contraste na faixa");
+        }
     }
 
     #[test]
