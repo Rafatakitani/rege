@@ -3,10 +3,12 @@
 
 use crate::command;
 use crate::config::Config;
+use crate::rtk;
 use crate::tmux::Tmux;
 use crate::worktree::Worktree;
 use anyhow::Result;
 use std::path::Path;
+use std::process::Command;
 use std::sync::OnceLock;
 
 /// A token unique to this master process, computed once. Every agent's tmux
@@ -87,10 +89,27 @@ impl Agent {
 
     pub fn start(&mut self) -> Result<()> {
         self.worktree.create()?;
+        self.install_rtk_hook();
         let cmd = self.build_command()?;
         self.tmux.start(&cmd, &self.worktree.path)?;
         self.state = State::Running;
         Ok(())
+    }
+
+    /// Lets `rtk` install its own hook inside the worktree, so the worker's
+    /// bash output gets compressed before it reaches that worker's model.
+    /// Best-effort: rege never learns rtk's hook format, and a failure here
+    /// only costs tokens — the worker runs either way.
+    fn install_rtk_hook(&self) {
+        let Some(argv) = rtk::worker_hook_argv(&self.cli) else {
+            return;
+        };
+        let _ = Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(&self.worktree.path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 
     fn build_command(&self) -> Result<String> {

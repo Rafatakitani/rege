@@ -75,7 +75,11 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 - **`rtk`**: se o binário [`rtk`](https://github.com/rtk-ai/rtk) estiver no `PATH`, o
   diff que vai pro contexto do mestre (`diff_agent`/`review`) passa por `rtk git diff`
   (-75% de tokens). O `.patch` do `open_pr` e o git plumbing continuam crus — diff
-  condensado não aplica. Desliga com `REGE_RTK=0`. Regra ao mexer aqui: **só comprima o
-  que um LLM vai ler**; o que é consumido por máquina fica cru.
+  condensado não aplica. Regra ao mexer aqui: **só comprima o que um LLM vai ler**; o
+  que é consumido por máquina fica cru.
+  Precedência num lugar só (`rtk::resolve`): `REGE_RTK` > `config.yml` >
+  autodetecção no `PATH`. Não crie um segundo botão pra mesma decisão.
+  `rtk.hook_workers` (opt-in explícito) roda `rtk init --hook-only` dentro do worktree
+  de cada worker listado em `rtk.clis` — autodetecção nunca liga isso sozinha.
 - Desenho completo: `docs/superpowers/specs/2026-07-23-rege-design.md`.
 - Preserve a atribuição MIT do `/buddy` (port de ramarivera/claude-buddy) no topo de `src/buddy.rs`.
