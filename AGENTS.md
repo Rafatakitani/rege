@@ -68,7 +68,7 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 
 ## Trabalhando NESTE repositório (rege em si)
 
-- Rust. `cargo test` (169 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- Rust. `cargo test` (171 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
 - **Versão**: `version` no `Cargo.toml` sobe em todo PR que muda comportamento —
   senão `rege --version` não distingue builds e ninguém sabe se o `update` pegou.
   O `build.rs` estampa o commit por cima (`rege 0.2.0 (b178154)`); o hash é

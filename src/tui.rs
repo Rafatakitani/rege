@@ -1975,9 +1975,23 @@ fn first_bit(s: &str, max: usize) -> String {
 /// One chat message → its display rows: text is split on embedded `\n` and each
 /// segment hard-wrapped to `width`, with continuation rows indented under the
 /// role glyph so the left gutter stays aligned.
+/// The user's own lines get a filled band across the pane, the way a shell
+/// echoes what you typed: `❯` alone put user and assistant one glyph apart, and
+/// scrolling back through a long conversation they blurred together.
+fn user_row_colors(theme: &str) -> ((u8, u8, u8), (u8, u8, u8)) {
+    let d = theme::color(theme, Role::Dim);
+    // Dim itself is too loud as a fill — darken it so the band reads as a
+    // surface behind the text, not as a highlight competing with it.
+    let bg = ((d.0 as f32 * 0.45) as u8, (d.1 as f32 * 0.45) as u8, (d.2 as f32 * 0.45) as u8);
+    (bg, theme::color(theme, Role::Text))
+}
+
 fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
+    if matches!(m.role, ChatRole::User) {
+        return user_lines(theme, &m.text, width);
+    }
     let (prefix, prefix_role, body_role) = match m.role {
-        ChatRole::User => ("❯ ", Role::Accent, Role::Text),
+        ChatRole::User => unreachable!("tratado acima"),
         ChatRole::Assistant => ("● ", Role::Accent, Role::Text),
         ChatRole::Tool => ("  ⚙ ", Role::Dim, Role::Dim),
         ChatRole::Info => ("", Role::Dim, Role::Dim),
@@ -1999,6 +2013,25 @@ fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
                     styled(theme, body_role, seg),
                 ])
             }
+        })
+        .collect()
+}
+
+/// A user message as a filled band: every row padded to the full width so the
+/// background is a solid block, not a ragged one that ends with the text.
+fn user_lines(theme: &str, text: &str, width: u16) -> Vec<Line<'static>> {
+    let (bg, fg) = user_row_colors(theme);
+    let style = Style::default().bg(rgb(bg)).fg(rgb(fg));
+    let cols = width as usize;
+    let budget = cols.saturating_sub(2).max(1); // "❯ "
+    wrap_text(text, budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            let gutter = if i == 0 { "❯ " } else { "  " };
+            let used = gutter.chars().count() + seg.chars().count();
+            let pad = " ".repeat(cols.saturating_sub(used));
+            Line::from(Span::styled(format!("{gutter}{seg}{pad}"), style))
         })
         .collect()
 }
@@ -3134,6 +3167,43 @@ mod tests {
         let row = painted2.iter().find(|l| l.contains("sim, escanear")).expect("linha do overlay");
         assert!(!row.contains("agentes"), "painel de agentes vazando: {row}");
         assert!(!row.contains('─'), "borda de outro painel vazando: {row}");
+    }
+
+    #[test]
+    fn user_messages_get_a_filled_band_and_assistant_ones_do_not() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.push(ChatRole::User, "sobe o servidor");
+        app.push(ChatRole::Assistant, "rodando em localhost:3000");
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        draw(area, &mut buf, &mut app);
+
+        let fundo_da_linha = |texto: &str| -> Option<Vec<ratatui::style::Color>> {
+            (0..area.height).find_map(|row| {
+                let linha: String = (0..area.width)
+                    .map(|c| buf.cell((c, row)).unwrap().symbol().to_string())
+                    .collect();
+                linha.contains(texto).then(|| {
+                    (0..area.width).map(|c| buf.cell((c, row)).unwrap().bg).collect()
+                })
+            })
+        };
+        let (bg, _) = user_row_colors(theme::DEFAULT);
+        let user = fundo_da_linha("sobe o servidor").expect("linha do usuário");
+        let assistant = fundo_da_linha("rodando em localhost").expect("linha do mestre");
+
+        assert!(user.iter().filter(|c| **c == rgb(bg)).count() > 40, "faixa preenchida na fala do usuário");
+        assert!(!assistant.iter().any(|c| *c == rgb(bg)), "a fala do mestre não leva faixa");
+    }
+
+    #[test]
+    fn the_user_band_stays_readable_on_every_theme() {
+        for name in theme::names() {
+            let (bg, fg) = user_row_colors(name);
+            let luma = |c: (u8, u8, u8)| (c.0 as i32 * 299 + c.1 as i32 * 587 + c.2 as i32 * 114) / 1000;
+            assert!((luma(fg) - luma(bg)).abs() > 70, "{name}: texto do usuário sem contraste na faixa");
+        }
     }
 
     #[test]
