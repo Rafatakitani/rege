@@ -68,7 +68,7 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 
 ## Trabalhando NESTE repositório (rege em si)
 
-- Rust. `cargo test` (155 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- Rust. `cargo test` (162 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
 - **Versão**: `version` no `Cargo.toml` sobe em todo PR que muda comportamento —
   senão `rege --version` não distingue builds e ninguém sabe se o `update` pegou.
   O `build.rs` estampa o commit por cima (`rege 0.2.0 (b178154)`); o hash é
@@ -88,6 +88,11 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
   autodetecção no `PATH`. Não crie um segundo botão pra mesma decisão.
   `rtk.hook_workers` (opt-in explícito) roda `rtk init --hook-only` dentro do worktree
   de cada worker listado em `rtk.clis` — autodetecção nunca liga isso sozinha.
+- **`transcript`**: `/resume` repinta a conversa passada lendo o JSONL que o
+  próprio `claude` guarda em `~/.claude/projects/<slug>/<id>.jsonl`. É
+  best-effort e só vale pro `claude` — outro CLI (ou histórico limpo) retoma sem
+  replay, como antes. Não inventamos formato de transcript: se a origem não
+  existe, não há o que mostrar.
 - **`scan`**: primeira vez num diretório → oferece escrever um `AGENTS.md` descrevendo
   ele. Coleta determinística e limitada (`MAX_FILES`/`MAX_DEPTH`) + uma chamada ao
   mestre com o digest pronto. A resposta fica em `~/.config/rege/scanned.yml`, nunca no

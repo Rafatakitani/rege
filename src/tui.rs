@@ -11,6 +11,7 @@ use crate::scan;
 use crate::sessions::{self, SessionRec};
 use crate::stream;
 use crate::theme::{self, Role};
+use crate::transcript;
 use anyhow::Result;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -183,6 +184,9 @@ struct App {
     scan_rx: Option<Receiver<Result<String, String>>>,
     /// Where the "already asked here" list lives.
     scanned_path: PathBuf,
+    /// Home dir, kept as a field so tests can point the transcript lookup at a
+    /// fixture instead of the real `~/.claude`.
+    home: PathBuf,
 }
 
 impl App {
@@ -231,6 +235,7 @@ impl App {
             history_draft: String::new(),
             scan_rx: None,
             scanned_path: scan::state_path(&crate::dirs_home()),
+            home: crate::dirs_home(),
         }
     }
 
@@ -310,12 +315,32 @@ impl App {
     fn resume_picker_confirm(&mut self) {
         if let Mode::ResumePicker { cursor } = self.mode {
             if let Some(rec) = self.resume_list.get(cursor) {
-                let title = rec.title.clone();
-                self.session_id = Some(rec.id.clone());
+                let (id, title) = (rec.id.clone(), rec.title.clone());
+                self.session_id = Some(id.clone());
                 self.push(ChatRole::Info, format!("retomando sessão: {title}"));
+                self.replay_transcript(&id);
             }
             self.mode = Mode::Normal;
         }
+    }
+
+    /// Repaints the past conversation into the chat pane. Resuming used to land
+    /// on an empty screen with only "retomando sessão: <título>" — the context
+    /// was there for the model but invisible to the user.
+    ///
+    /// The transcript belongs to the driver CLI, so this is best-effort: no file
+    /// (other CLI, cleaned-up history) just means no replay, same as before.
+    fn replay_transcript(&mut self, session_id: &str) {
+        let path = transcript::transcript_path(&self.home, &self.repo, session_id);
+        let turns = transcript::read(&path);
+        if turns.is_empty() {
+            return;
+        }
+        for turn in &turns {
+            let role = if turn.from_user { ChatRole::User } else { ChatRole::Assistant };
+            self.push(role, turn.text.clone());
+        }
+        self.push(ChatRole::Info, format!("— fim do histórico ({} mensagens) · continue daqui —", turns.len()));
     }
 
     fn resume_picker_cancel(&mut self) {
@@ -2949,6 +2974,54 @@ mod tests {
         let row = painted2.iter().find(|l| l.contains("sim, escanear")).expect("linha do overlay");
         assert!(!row.contains("agentes"), "painel de agentes vazando: {row}");
         assert!(!row.contains('─'), "borda de outro painel vazando: {row}");
+    }
+
+    #[test]
+    fn resume_replays_the_past_conversation_into_the_chat() {
+        let home = scan_tmp("resume-home");
+        let repo = "/home/u/proj";
+        let dir = home.join(".claude/projects").join(transcript::project_slug(repo));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("sess-9.jsonl"),
+            [
+                r#"{"type":"user","message":{"role":"user","content":"playbook\n\nTarefa: resuma o projeto"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"x"}]}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"É um app Rails."}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let mut app = App::new(&config, repo);
+        app.home = home;
+        app.resume_list =
+            vec![SessionRec { id: "sess-9".into(), title: "resuma".into(), repo: repo.into(), ts: 1 }];
+        app.mode = Mode::ResumePicker { cursor: 0 };
+        app.resume_picker_confirm();
+
+        assert_eq!(app.session_id.as_deref(), Some("sess-9"));
+        let chat: Vec<(bool, String)> =
+            app.chat.iter().map(|m| (matches!(m.role, ChatRole::User), m.text.clone())).collect();
+        assert!(chat.contains(&(true, "resuma o projeto".to_string())), "fala do usuário: {chat:?}");
+        assert!(chat.contains(&(false, "É um app Rails.".to_string())), "resposta do mestre: {chat:?}");
+        assert!(!chat.iter().any(|(_, t)| t.contains("playbook")), "playbook não vai pra tela");
+        assert!(app.chat.iter().any(|m| m.text.contains("fim do histórico")), "marca onde o passado acaba");
+    }
+
+    #[test]
+    fn resume_without_a_transcript_still_resumes() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/home/u/sem-historico");
+        app.home = scan_tmp("resume-vazio");
+        app.resume_list =
+            vec![SessionRec { id: "nada".into(), title: "t".into(), repo: "/home/u/sem-historico".into(), ts: 1 }];
+        app.mode = Mode::ResumePicker { cursor: 0 };
+        app.resume_picker_confirm();
+        // Best-effort: no transcript (other CLI, cleaned history) is not a failure.
+        assert_eq!(app.session_id.as_deref(), Some("nada"));
+        assert!(app.chat.iter().any(|m| m.text.contains("retomando sessão")));
     }
 
     #[test]
