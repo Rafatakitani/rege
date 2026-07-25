@@ -7,6 +7,7 @@ use crate::command;
 use crate::config::{Config, RosterEntry};
 use crate::driver;
 use crate::playbook;
+use crate::scan;
 use crate::sessions::{self, SessionRec};
 use crate::stream;
 use crate::theme::{self, Role};
@@ -110,6 +111,9 @@ enum Mode {
     AgentsPicker { cursor: usize },
     /// Text prompt for adding a roster entry by hand: `cli [role] [model]`.
     AgentsAdd { input: String },
+    /// First run in this directory: offer to scan it into an `AGENTS.md`.
+    /// Answered with s/n; either answer is remembered so it's asked once.
+    ScanOffer,
 }
 
 /// A rendered line in the agents overlay. `Header` rows are labels only; every
@@ -165,6 +169,10 @@ struct App {
     history_idx: Option<usize>,
     /// Whatever was typed before browsing started, restored on the way back.
     history_draft: String,
+    /// Result of a running context scan, drained each tick like the chat stream.
+    scan_rx: Option<Receiver<Result<String, String>>>,
+    /// Where the "already asked here" list lives.
+    scanned_path: PathBuf,
 }
 
 impl App {
@@ -211,6 +219,8 @@ impl App {
             history: Vec::new(),
             history_idx: None,
             history_draft: String::new(),
+            scan_rx: None,
+            scanned_path: scan::state_path(&crate::dirs_home()),
         }
     }
 
@@ -236,7 +246,8 @@ impl App {
             Mode::Normal
             | Mode::ResumePicker { .. }
             | Mode::AgentsPicker { .. }
-            | Mode::AgentsAdd { .. } => &self.theme,
+            | Mode::AgentsAdd { .. }
+            | Mode::ScanOffer => &self.theme,
         }
     }
 
@@ -690,6 +701,90 @@ impl App {
         });
     }
 
+    /// Asks about scanning this directory, but only where it's free of
+    /// consequence: no context file yet and no answer on record for this path.
+    fn offer_scan_if_first_run(&mut self) {
+        let dir = PathBuf::from(&self.repo);
+        if !scan::should_offer(&dir, &scan::load_state(&self.scanned_path)) {
+            return;
+        }
+        self.mode = Mode::ScanOffer;
+        self.push(
+            ChatRole::Info,
+            format!("primeira vez aqui ({}).", self.repo),
+        );
+        self.push(
+            ChatRole::Info,
+            format!(
+                "escaneio o diretório e escrevo um {} descrevendo ele? [s/n]",
+                scan::CONTEXT_FILE
+            ),
+        );
+    }
+
+    /// Records the answer so this is asked once per directory, whichever way
+    /// it went, and kicks off the scan on yes.
+    fn answer_scan_offer(&mut self, yes: bool) {
+        self.mode = Mode::Normal;
+        let dir = PathBuf::from(&self.repo);
+        if let Err(e) = scan::record(&self.scanned_path, &dir, if yes { "yes" } else { "no" }) {
+            self.push(ChatRole::Error, format!("não consegui gravar a resposta: {e}"));
+        }
+        if yes {
+            self.start_scan(false);
+        } else {
+            self.push(ChatRole::Info, "ok, não pergunto de novo aqui. `/scan` roda quando quiser.");
+        }
+    }
+
+    /// Runs the scan off-thread — it's a model call, and the UI shouldn't
+    /// freeze for it. The result lands via `scan_rx` on a later tick.
+    fn start_scan(&mut self, force: bool) {
+        if self.scan_rx.is_some() {
+            self.push(ChatRole::Info, "já tem um scan rodando.");
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.scan_rx = Some(rx);
+        self.push(ChatRole::Info, "escaneando o diretório… (uma chamada ao mestre)");
+        let dir = PathBuf::from(&self.repo);
+        let cfg = self.scan_config();
+        let home = crate::dirs_home();
+        std::thread::spawn(move || {
+            let msg = scan::run(&dir, &cfg, &home, force)
+                .map(|p| p.display().to_string())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(msg);
+        });
+    }
+
+    /// The master as currently set in the TUI — `/model` changes apply to the
+    /// scan too, instead of it silently using the on-disk config.
+    fn scan_config(&self) -> Config {
+        let mut cfg = Config::default();
+        cfg.master.cli = self.master_cli.clone();
+        cfg.master.model = self.master_model.clone();
+        cfg
+    }
+
+    fn drain_scan(&mut self) {
+        let Some(rx) = &self.scan_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(path)) => {
+                self.push(ChatRole::Info, format!("✓ escrito: {path}"));
+                self.scan_rx = None;
+            }
+            Ok(Err(e)) => {
+                self.push(ChatRole::Error, format!("scan falhou: {e}"));
+                self.scan_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.scan_rx = None,
+        }
+    }
+
     /// Drains any pending stream events without blocking, mapping each to a
     /// chat line (or updating `session_id` on Ready / closing `rx` on Done).
     fn drain_stream(&mut self) {
@@ -757,8 +852,13 @@ impl App {
                 self.push(ChatRole::Info, "  /config          mostra config efetiva");
                 self.push(ChatRole::Info, "  /resume          retoma sessão anterior");
                 self.push(ChatRole::Info, "  /agents          roster de agentes (ativos: /agents ativos)");
+                self.push(ChatRole::Info, "  /scan [--force]  escaneia o diretório e escreve o AGENTS.md");
                 self.push(ChatRole::Info, "  /buddy [pet]     bicho de estimação");
                 self.push(ChatRole::Info, "  /quit            sai (ou exit/quit/:q)");
+            }
+            "/scan" => {
+                let force = parts.next() == Some("--force");
+                self.start_scan(force);
             }
             "/model" => match parts.next() {
                 None => {
@@ -840,7 +940,7 @@ impl App {
 }
 
 const KNOWN_COMMANDS: &[&str] =
-    &["/quit", "/q", "/help", "/?", "/model", "/config", "/theme", "/resume", "/agents", "/buddy"];
+    &["/quit", "/q", "/help", "/?", "/model", "/config", "/theme", "/resume", "/agents", "/buddy", "/scan"];
 
 /// Commands surfaced in the autocomplete popup, with a one-line hint each.
 /// Aliases (`/q`, `/?`) stay out of the menu but remain valid to type.
@@ -851,6 +951,7 @@ const COMMAND_CATALOG: &[(&str, &str)] = &[
     ("/config", "mostra a config efetiva"),
     ("/resume", "retoma sessão anterior"),
     ("/agents", "roster de agentes (conecta/remove)"),
+    ("/scan", "escaneia o diretório e escreve o AGENTS.md"),
     ("/buddy", "bicho de estimação animado"),
     ("/quit", "sai do rege"),
 ];
@@ -1102,6 +1203,7 @@ pub fn run(config: &Config, repo: &str) -> Result<()> {
 
     let mut app = App::new(config, repo);
     app.refresh_agents();
+    app.offer_scan_if_first_run();
     let result = event_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
@@ -1114,6 +1216,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
     let mut last_poll = Instant::now();
     loop {
         app.drain_stream();
+        app.drain_scan();
         if let Some((_, ts)) = &app.flash {
             if ts.elapsed() >= Duration::from_secs(2) {
                 app.flash = None;
@@ -1163,6 +1266,15 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             KeyCode::Char('a') => app.mode = Mode::AgentsAdd { input: String::new() },
                             KeyCode::Char('x') | KeyCode::Delete => app.agents_picker_remove(),
                             KeyCode::Esc => app.agents_picker_cancel(),
+                            _ => {}
+                        },
+                        Mode::ScanOffer => match key.code {
+                            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char('y') => {
+                                app.answer_scan_offer(true)
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                app.answer_scan_offer(false)
+                            }
                             _ => {}
                         },
                         Mode::AgentsAdd { .. } => match key.code {
@@ -2316,6 +2428,58 @@ mod tests {
         app.input = "faz X".into();
         assert!(!app.menu_accept(), "closed menu must fall through to submit");
         assert_eq!(app.input, "faz X");
+    }
+
+    fn scan_tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rege-tui-scan-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn scan_offer_asks_once_then_remembers_the_no() {
+        let dir = scan_tmp("offer");
+        let config = Config::default();
+        let mut app = App::new(&config, dir.to_str().unwrap());
+        app.scanned_path = dir.join("state/scanned.yml");
+
+        app.offer_scan_if_first_run();
+        assert!(matches!(app.mode, Mode::ScanOffer));
+        assert!(app.chat.iter().any(|m| m.text.contains(scan::CONTEXT_FILE)));
+
+        app.answer_scan_offer(false);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.scan_rx.is_none(), "não é pra ter disparado scan nenhum");
+
+        // Segunda abertura no mesmo diretório: silêncio.
+        let mut app2 = App::new(&config, dir.to_str().unwrap());
+        app2.scanned_path = dir.join("state/scanned.yml");
+        app2.offer_scan_if_first_run();
+        assert!(matches!(app2.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn scan_offer_stays_quiet_when_the_file_already_exists() {
+        let dir = scan_tmp("existing");
+        std::fs::write(dir.join(scan::CONTEXT_FILE), "# escrito à mão\n").unwrap();
+        let config = Config::default();
+        let mut app = App::new(&config, dir.to_str().unwrap());
+        app.scanned_path = dir.join("state/scanned.yml");
+
+        app.offer_scan_if_first_run();
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn scan_uses_the_master_currently_set_in_the_tui() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.master_cli = "codex".into();
+        app.master_model = Some("o3".into());
+        let cfg = app.scan_config();
+        assert_eq!(cfg.master.cli, "codex");
+        assert_eq!(cfg.master.model.as_deref(), Some("o3"), "/model vale pro scan também");
     }
 
     #[test]
