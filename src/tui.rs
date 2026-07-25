@@ -159,6 +159,12 @@ struct App {
     /// Highlighted row in the slash-command autocomplete popup. Only meaningful
     /// while the menu is open (input is a bare `/prefix`).
     menu_cursor: usize,
+    /// Lines already sent, oldest first — what ↑/↓ walk through.
+    history: Vec<String>,
+    /// Position in `history` while browsing; `None` means the input is fresh.
+    history_idx: Option<usize>,
+    /// Whatever was typed before browsing started, restored on the way back.
+    history_draft: String,
 }
 
 impl App {
@@ -202,6 +208,9 @@ impl App {
             roster: config.roster.clone(),
             installed_clis: Vec::new(),
             menu_cursor: 0,
+            history: Vec::new(),
+            history_idx: None,
+            history_draft: String::new(),
         }
     }
 
@@ -434,7 +443,14 @@ impl App {
         let byte_idx = self.input.char_indices().nth(self.input_cursor).map(|(i, _)| i).unwrap_or(self.input.len());
         self.input.insert(byte_idx, c);
         self.input_cursor += 1;
+        self.on_input_edited();
+    }
+
+    /// Any hand edit drops out of history browsing (the line is now the user's,
+    /// not a recalled one) and re-arms the slash popup from the top.
+    fn on_input_edited(&mut self) {
         self.menu_cursor = 0;
+        self.history_idx = None;
     }
 
     /// Inserts pasted text as a single logical line: `input` has no real
@@ -445,7 +461,7 @@ impl App {
         let byte_idx = self.input.char_indices().nth(self.input_cursor).map(|(i, _)| i).unwrap_or(self.input.len());
         self.input.insert_str(byte_idx, &text);
         self.input_cursor += text.chars().count();
-        self.menu_cursor = 0;
+        self.on_input_edited();
     }
 
     fn input_backspace(&mut self) {
@@ -455,14 +471,14 @@ impl App {
         let byte_idx = self.input.char_indices().nth(self.input_cursor - 1).map(|(i, _)| i).unwrap();
         self.input.remove(byte_idx);
         self.input_cursor -= 1;
-        self.menu_cursor = 0;
+        self.on_input_edited();
     }
 
     fn input_delete(&mut self) {
         if let Some((byte_idx, _)) = self.input.char_indices().nth(self.input_cursor) {
             self.input.remove(byte_idx);
         }
-        self.menu_cursor = 0;
+        self.on_input_edited();
     }
 
     fn input_left(&mut self) {
@@ -533,11 +549,20 @@ impl App {
     /// the input is a bare `/prefix` (leading `/`, no space yet). Empty means
     /// the popup is closed.
     fn command_menu(&self) -> Vec<(&'static str, &'static str)> {
+        // Recalling `/help` from history shouldn't reopen the popup — ↑↓ have
+        // to keep meaning "walk the history" until the user types again.
+        if self.history_idx.is_some() {
+            return Vec::new();
+        }
         let inp = self.input.trim_start();
         if !inp.starts_with('/') || inp.chars().any(char::is_whitespace) {
             return Vec::new();
         }
         COMMAND_CATALOG.iter().filter(|(cmd, _)| cmd.starts_with(inp)).copied().collect()
+    }
+
+    fn menu_open(&self) -> bool {
+        !self.command_menu().is_empty()
     }
 
     fn menu_move(&mut self, delta: isize) {
@@ -577,6 +602,55 @@ impl App {
         true
     }
 
+    /// Records a sent line. Consecutive duplicates collapse — resending the
+    /// same thing twice shouldn't cost two ↑ presses to get past.
+    fn history_push(&mut self, line: &str) {
+        if self.history.last().map(String::as_str) != Some(line) {
+            self.history.push(line.to_string());
+        }
+        self.history_idx = None;
+        self.history_draft.clear();
+    }
+
+    /// ↑: walk back through sent lines. The half-typed input is stashed on the
+    /// first step and comes back when you walk past the newest entry.
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let idx = match self.history_idx {
+            None => {
+                self.history_draft = self.input.clone();
+                self.history.len() - 1
+            }
+            Some(0) => 0, // already at the oldest — stay put
+            Some(i) => i - 1,
+        };
+        self.history_idx = Some(idx);
+        self.set_input(self.history[idx].clone());
+    }
+
+    /// ↓: walk forward; past the newest entry restores the stashed draft.
+    fn history_next(&mut self) {
+        let Some(i) = self.history_idx else {
+            return;
+        };
+        if i + 1 < self.history.len() {
+            self.history_idx = Some(i + 1);
+            self.set_input(self.history[i + 1].clone());
+        } else {
+            self.history_idx = None;
+            let draft = std::mem::take(&mut self.history_draft);
+            self.set_input(draft);
+        }
+    }
+
+    fn set_input(&mut self, text: String) {
+        self.input = text;
+        self.input_cursor = self.input.chars().count();
+        self.menu_cursor = 0;
+    }
+
     fn submit(&mut self) {
         let line = self.input.trim().to_string();
         self.input.clear();
@@ -584,6 +658,7 @@ impl App {
         if line.is_empty() {
             return;
         }
+        self.history_push(&line);
         if line.starts_with('/') && is_known_command(&line) {
             self.dispatch(&line);
             return;
@@ -1106,11 +1181,23 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             _ => {}
                         },
                         Mode::Normal => match key.code {
-                            // Tab / ↑↓ drive the slash-command popup when it's
-                            // open; otherwise they're inert (no history yet).
+                            // Tab / ↑↓ drive the slash-command popup while it's
+                            // open; with it closed, ↑↓ walk the sent-line history.
                             KeyCode::Tab => app.menu_complete(),
-                            KeyCode::Up => app.menu_move(-1),
-                            KeyCode::Down => app.menu_move(1),
+                            KeyCode::Up => {
+                                if app.menu_open() {
+                                    app.menu_move(-1)
+                                } else {
+                                    app.history_prev()
+                                }
+                            }
+                            KeyCode::Down => {
+                                if app.menu_open() {
+                                    app.menu_move(1)
+                                } else {
+                                    app.history_next()
+                                }
+                            }
                             KeyCode::Char(c) => app.input_insert(c),
                             KeyCode::Backspace => app.input_backspace(),
                             KeyCode::Delete => app.input_delete(),
@@ -2229,6 +2316,88 @@ mod tests {
         app.input = "faz X".into();
         assert!(!app.menu_accept(), "closed menu must fall through to submit");
         assert_eq!(app.input, "faz X");
+    }
+
+    #[test]
+    fn history_walks_back_and_forward_through_sent_lines() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.history_push("primeira");
+        app.history_push("segunda");
+
+        app.history_prev();
+        assert_eq!(app.input, "segunda", "↑ pega a mais recente");
+        assert_eq!(app.input_cursor, "segunda".chars().count(), "cursor no fim");
+        app.history_prev();
+        assert_eq!(app.input, "primeira");
+        app.history_prev();
+        assert_eq!(app.input, "primeira", "para na mais antiga, não some");
+
+        app.history_next();
+        assert_eq!(app.input, "segunda");
+        app.history_next();
+        assert_eq!(app.input, "", "passou da mais nova: volta pro input vazio");
+        assert!(app.history_idx.is_none());
+    }
+
+    #[test]
+    fn history_restores_the_half_typed_draft() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.history_push("comando antigo");
+        app.input = "estava escrevendo isso".into();
+
+        app.history_prev();
+        assert_eq!(app.input, "comando antigo");
+        app.history_next();
+        assert_eq!(app.input, "estava escrevendo isso", "o rascunho volta intacto");
+    }
+
+    #[test]
+    fn history_collapses_consecutive_duplicates() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.history_push("igual");
+        app.history_push("igual");
+        assert_eq!(app.history.len(), 1);
+        app.history_push("outra");
+        app.history_push("igual");
+        assert_eq!(app.history.len(), 3, "não-consecutiva entra de novo");
+    }
+
+    #[test]
+    fn history_prev_is_noop_on_first_run() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.input = "rascunho".into();
+        app.history_prev();
+        assert_eq!(app.input, "rascunho", "sem histórico, ↑ não mexe no input");
+    }
+
+    #[test]
+    fn recalled_slash_command_does_not_reopen_the_popup() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.history_push("/help");
+        app.history_prev();
+        assert_eq!(app.input, "/help");
+        assert!(!app.menu_open(), "↑↓ seguem sendo histórico até digitar de novo");
+        // Digitar re-arma o popup.
+        app.input_insert('x');
+        app.input_backspace();
+        assert!(app.menu_open());
+    }
+
+    #[test]
+    fn typing_leaves_history_browsing() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.history_push("antiga");
+        app.history_prev();
+        assert!(app.history_idx.is_some());
+        app.input_insert('!');
+        assert!(app.history_idx.is_none(), "a linha agora é do usuário");
+        assert_eq!(app.input, "antiga!");
     }
 
     #[test]
