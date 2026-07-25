@@ -219,6 +219,11 @@ pub fn prompt(f: &Facts) -> String {
          a tarefa — a sua resposta inteira vai virar o arquivo, literalmente.\n",
     );
     s.push_str(
+        "\nVocê não tem ferramentas nesta sessão e não precisa delas: tudo que é pra \
+         estar no arquivo já está nos dados acima. Não tente escrever o arquivo você \
+         mesmo e não escreva aviso nenhum sobre não ter podido inspecionar o repo.\n",
+    );
+    s.push_str(
         "\nResponda APENAS com o markdown do arquivo, sem cercas de código em volta \
          e sem comentários seus. Seções sugeridas: o que é, como rodar/testar, \
          estrutura, convenções. Seja específico e curto; não invente o que não \
@@ -271,7 +276,8 @@ pub fn run(dir: &Path, cfg: &Config, home: &Path, force: bool) -> Result<PathBuf
         bail!("{} já existe — use --force pra sobrescrever", target.display());
     }
     let facts = collect(dir, home);
-    let argv = command::argv(&cfg.master.cli, &prompt(&facts), cfg.master.model.as_deref(), false)?;
+    let mut argv = command::argv(&cfg.master.cli, &prompt(&facts), cfg.master.model.as_deref(), false)?;
+    argv.extend(command::text_only_flags(&cfg.master.cli));
     let out = Command::new(&argv[0]).args(&argv[1..]).current_dir(dir).output()?;
     if !out.status.success() {
         bail!("{} falhou: {}", cfg.master.cli, String::from_utf8_lossy(&out.stderr).trim());
@@ -298,13 +304,23 @@ fn looks_like_a_document(body: &str) -> bool {
     has_heading && body.lines().filter(|l| !l.trim().is_empty()).count() >= 3
 }
 
-/// Models like wrapping a whole file in ```markdown despite being told not to.
+/// Models like wrapping a whole file in ```markdown despite being told not to,
+/// and sometimes bracket it with chatter ("couldn't inspect the repo, but…").
+/// When a fenced block is present, that block *is* the file — anything outside
+/// it is the model talking to us, not content.
 fn strip_fences(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let opens = lines.first().is_some_and(|l| l.trim_start().starts_with("```"));
-    let closes = lines.last().is_some_and(|l| l.trim() == "```");
-    if opens && closes && lines.len() >= 2 {
-        return lines[1..lines.len() - 1].join("\n").trim().to_string();
+    let Some(open) = lines.iter().position(|l| l.trim_start().starts_with("```")) else {
+        return text.to_string();
+    };
+    let Some(close) = lines.iter().rposition(|l| l.trim() == "```") else { return text.to_string() };
+    // A real document's own code blocks must survive. Treat the outer fence as
+    // a wrapper only when nothing before it looks like content (no heading) and
+    // the closing fence really ends the answer.
+    let preamble_is_chatter = !lines[..open].iter().any(|l| l.trim_start().starts_with('#'));
+    let closes_the_answer = lines[close + 1..].iter().all(|l| l.trim().is_empty());
+    if close > open && preamble_is_chatter && closes_the_answer {
+        return lines[open + 1..close].join("\n").trim().to_string();
     }
     text.to_string()
 }
@@ -430,5 +446,12 @@ mod tests {
         assert_eq!(strip_fences("# Oi\n\ntexto"), "# Oi\n\ntexto");
         // Fence only at the start isn't a wrapper — leave it alone.
         assert_eq!(strip_fences("```sh\nls\n\ntexto"), "```sh\nls\n\ntexto");
+        // Chatter before the wrapper: the block is the file, the chatter isn't.
+        assert_eq!(strip_fences("Sem tool de leitura aqui.\n\n```markdown\n# Oi\n\ntexto\n```"), "# Oi\n\ntexto");
+        // A document's OWN code blocks must survive untouched.
+        let doc = "# Projeto\n\n## Testes\n\n```sh\ncargo test\n```";
+        assert_eq!(strip_fences(doc), doc);
+        let ends_fenced = "# Projeto\n\nrode:\n\n```sh\nls\n```\n";
+        assert_eq!(strip_fences(ends_fenced), ends_fenced);
     }
 }

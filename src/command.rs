@@ -66,6 +66,22 @@ pub fn probe(cli: &str) -> Result<Vec<String>> {
     argv(cli, "reply with OK", None, false)
 }
 
+/// Extra flags for a call that wants *prose back*, not work done: the model
+/// answers from the prompt alone. Without this, a CLI handed "write the
+/// contents of AGENTS.md" reaches for its `Write` tool and blocks on a
+/// permission prompt — whose text then lands on stdout as if it were the
+/// answer. Only `claude` exposes a flag for this; the rest return empty, so
+/// callers stay best-effort rather than pretending to a guarantee.
+pub fn text_only_flags(cli: &str) -> Vec<String> {
+    match cli {
+        "claude" => ["--disallowedTools", "Write", "Edit", "NotebookEdit", "Bash", "Read", "Glob", "Grep", "Task"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +102,15 @@ mod tests {
     fn gemini_yolo() {
         let a = argv("gemini", "t", None, true).unwrap();
         assert_eq!(a, vec!["gemini", "-p", "t", "--yolo"]);
+    }
+
+    #[test]
+    fn text_only_disables_the_tools_that_hijack_a_prose_answer() {
+        let f = text_only_flags("claude");
+        assert_eq!(f.first().map(String::as_str), Some("--disallowedTools"));
+        // Write is the one that actually blocked on a permission prompt.
+        assert!(f.contains(&"Write".to_string()));
+        assert!(text_only_flags("codex").is_empty(), "sem flag conhecida: melhor vazio que chute");
     }
 
     #[test]
