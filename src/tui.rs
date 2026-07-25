@@ -28,7 +28,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Terminal;
 use std::io::Stdout;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -112,8 +112,9 @@ enum Mode {
     /// Text prompt for adding a roster entry by hand: `cli [role] [model]`.
     AgentsAdd { input: String },
     /// First run in this directory: offer to scan it into an `AGENTS.md`.
-    /// Answered with s/n; either answer is remembered so it's asked once.
-    ScanOffer,
+    /// Answered with s/n or the cursor; either answer is remembered so it's
+    /// asked once. `cursor` walks [sim, não] like the other pickers.
+    ScanOffer { cursor: usize },
 }
 
 /// A rendered line in the agents overlay. `Header` rows are labels only; every
@@ -247,7 +248,7 @@ impl App {
             | Mode::ResumePicker { .. }
             | Mode::AgentsPicker { .. }
             | Mode::AgentsAdd { .. }
-            | Mode::ScanOffer => &self.theme,
+            | Mode::ScanOffer { .. } => &self.theme,
         }
     }
 
@@ -521,6 +522,9 @@ impl App {
             let col_offset = (col.saturating_sub(inner_x) as usize).min(end - start);
             let clicked = (start + col_offset).saturating_sub(2); // drop "❯ " prefix
             self.input_cursor = clicked.min(self.input.chars().count());
+            // Clicking into the input drops the previous highlight too.
+            self.selection_start = None;
+            self.selection_end = None;
             return;
         }
         self.selection_start = Some((col, row));
@@ -542,18 +546,29 @@ impl App {
     }
 
     /// Extracts the selected text from `row_text` and, if `auto_copy` is on,
-    /// copies it via OSC52 and shows a transient status-bar message.
+    /// copies it and shows a transient status-bar message.
+    ///
+    /// The range is deliberately *kept* after copying: a selection that
+    /// vanished the instant the button came up gave no confirmation of what had
+    /// been grabbed. The next click clears it, like a terminal's own selection.
     fn finalize_selection(&mut self) {
-        let (start, end) = match (self.selection_start.take(), self.selection_end.take()) {
+        let (start, end) = match (self.selection_start, self.selection_end) {
             (Some(s), Some(e)) => (s, e),
             _ => return,
         };
+        // A bare click selects nothing — don't leave a one-cell smudge behind.
+        if start == end {
+            self.selection_start = None;
+            self.selection_end = None;
+            return;
+        }
         let text = extract_selection(&self.row_text, start, end);
         if text.is_empty() || !self.auto_copy {
             return;
         }
-        copy_to_clipboard(&text);
-        self.flash = Some((format!("copiado {} chars · /config desativa", text.chars().count()), Instant::now()));
+        let via = copy_to_clipboard(&text).unwrap_or_else(|| "osc52".to_string());
+        self.flash =
+            Some((format!("copiado {} chars via {via} · /config desativa", text.chars().count()), Instant::now()));
     }
 
     /// Slash-command matches for the autocomplete popup: non-empty only while
@@ -708,18 +723,15 @@ impl App {
         if !scan::should_offer(&dir, &scan::load_state(&self.scanned_path)) {
             return;
         }
-        self.mode = Mode::ScanOffer;
-        self.push(
-            ChatRole::Info,
-            format!("primeira vez aqui ({}).", self.repo),
-        );
-        self.push(
-            ChatRole::Info,
-            format!(
-                "escaneio o diretório e escrevo um {} descrevendo ele? [s/n]",
-                scan::CONTEXT_FILE
-            ),
-        );
+        // The question lives in the overlay, not in the log: as a chat line it
+        // read as scrollback and got missed. Only the outcome gets logged.
+        self.mode = Mode::ScanOffer { cursor: 0 };
+    }
+
+    fn scan_offer_move(&mut self, delta: isize) {
+        if let Mode::ScanOffer { cursor } = &mut self.mode {
+            *cursor = if delta < 0 { cursor.saturating_sub(1) } else { (*cursor + 1).min(1) };
+        }
     }
 
     /// Records the answer so this is asked once per directory, whichever way
@@ -727,6 +739,7 @@ impl App {
     fn answer_scan_offer(&mut self, yes: bool) {
         self.mode = Mode::Normal;
         let dir = PathBuf::from(&self.repo);
+        self.push(ChatRole::Info, format!("primeira vez aqui ({}).", self.repo));
         if let Err(e) = scan::record(&self.scanned_path, &dir, if yes { "yes" } else { "no" }) {
             self.push(ChatRole::Error, format!("não consegui gravar a resposta: {e}"));
         }
@@ -1015,14 +1028,63 @@ fn osc52_sequence(text: &str) -> String {
     }
 }
 
-/// Writes the OSC52 clipboard-set sequence directly to stdout, bypassing
-/// ratatui's buffer (raw mode is on, so this reaches the terminal untouched).
-fn copy_to_clipboard(text: &str) {
+/// Copies by both routes available, because each fails in cases the other
+/// covers: OSC52 is the only one that works over ssh/tmux, but terminals are
+/// free to ignore it (and many drop it silently, which reads as "copy is
+/// broken"); a local helper actually owns the selection but can't reach a
+/// remote clipboard.
+/// Returns the helper it also used, if any — the status line names it, so a
+/// failed paste points at the right suspect instead of "copy is broken".
+fn copy_to_clipboard(text: &str) -> Option<String> {
     use std::io::Write;
     let seq = osc52_sequence(text);
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(seq.as_bytes());
     let _ = stdout.flush();
+
+    if let Some(argv) = clipboard_helper() {
+        let name = argv[0].clone();
+        let text = text.to_string();
+        // Off-thread: `xclip` stays alive owning the selection, so waiting on
+        // it here would freeze the UI until someone else copies something.
+        std::thread::spawn(move || {
+            let mut cmd = Command::new(&argv[0]);
+            cmd.args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            if let Ok(mut child) = cmd.spawn() {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                drop(child.stdin.take());
+                let _ = child.wait();
+            }
+        });
+        return Some(name);
+    }
+    None
+}
+
+/// The system clipboard command for this session, if one is installed. Wayland
+/// first — `xclip`/`xsel` reach XWayland's clipboard, which is bridged but a
+/// step removed.
+fn clipboard_helper() -> Option<Vec<String>> {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let x11 = std::env::var_os("DISPLAY").is_some();
+    pick_clipboard_helper(wayland, x11, cli_installed)
+}
+
+/// Split from the env lookup so the precedence is testable without a display.
+fn pick_clipboard_helper(wayland: bool, x11: bool, installed: impl Fn(&str) -> bool) -> Option<Vec<String>> {
+    let argv = |parts: &[&str]| Some(parts.iter().map(|s| s.to_string()).collect());
+    if wayland && installed("wl-copy") {
+        return argv(&["wl-copy"]);
+    }
+    if x11 && installed("xclip") {
+        return argv(&["xclip", "-selection", "clipboard"]);
+    }
+    if x11 && installed("xsel") {
+        return argv(&["xsel", "--clipboard", "--input"]);
+    }
+    None
 }
 
 /// Coarse relative-time label ("agora", "2h", "3d") for a past `ts` (unix
@@ -1268,13 +1330,16 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             KeyCode::Esc => app.agents_picker_cancel(),
                             _ => {}
                         },
-                        Mode::ScanOffer => match key.code {
+                        Mode::ScanOffer { cursor } => match key.code {
                             KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char('y') => {
                                 app.answer_scan_offer(true)
                             }
                             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                                 app.answer_scan_offer(false)
                             }
+                            KeyCode::Up => app.scan_offer_move(-1),
+                            KeyCode::Down => app.scan_offer_move(1),
+                            KeyCode::Enter => app.answer_scan_offer(cursor == 0),
                             _ => {}
                         },
                         Mode::AgentsAdd { .. } => match key.code {
@@ -1412,6 +1477,9 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
     if let Mode::AgentsAdd { .. } = &app.mode {
         draw_agents_add(area, buf, app);
     }
+    if let Mode::ScanOffer { cursor } = app.mode {
+        draw_scan_offer(area, buf, app, cursor);
+    }
     if matches!(app.mode, Mode::Normal) {
         draw_command_menu(buf, app, app.input_rect);
     }
@@ -1420,13 +1488,32 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
     // even in terminals/tmux where the OSC52 copy is silently dropped.
     if matches!(app.mode, Mode::Normal) {
         if let (Some(start), Some(end)) = (app.selection_start, app.selection_end) {
-            highlight_selection(area, buf, start, end);
+            highlight_selection(area, buf, start, end, theme);
         }
     }
 }
 
-/// Reverse-videos every cell inside the selection range on the current frame.
-fn highlight_selection(area: Rect, buf: &mut ratatui::buffer::Buffer, start: (u16, u16), end: (u16, u16)) {
+/// Selection colors: a solid light background with dark text on top, the way a
+/// terminal's own selection looks. `REVERSED` was the obvious choice and the
+/// wrong one — against these palettes it rendered almost invisible, so users
+/// couldn't see what they were selecting.
+fn selection_colors(theme: &str) -> ((u8, u8, u8), (u8, u8, u8)) {
+    let bg = theme::color(theme, Role::Text);
+    let luma = (bg.0 as u32 * 299 + bg.1 as u32 * 587 + bg.2 as u32 * 114) / 1000;
+    let fg = if luma > 128 { (18, 20, 24) } else { (245, 245, 245) };
+    (bg, fg)
+}
+
+/// Paints the selection range on the current frame.
+fn highlight_selection(
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    start: (u16, u16),
+    end: (u16, u16),
+    theme: &str,
+) {
+    let (bg, fg) = selection_colors(theme);
+    let style = Style::default().bg(rgb(bg)).fg(rgb(fg));
     let (mut c0, mut r0) = start;
     let (mut c1, mut r1) = end;
     if r0 > r1 || (r0 == r1 && c0 > c1) {
@@ -1451,7 +1538,7 @@ fn highlight_selection(area: Rect, buf: &mut ratatui::buffer::Buffer, start: (u1
                 continue;
             }
             if let Some(cell) = buf.cell_mut((col, row)) {
-                cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
+                cell.set_style(style);
             }
         }
     }
@@ -1916,6 +2003,35 @@ fn draw_agents_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
     Paragraph::new(lines).render(inner, buf);
 }
 
+/// First-run scan offer. It's a question that blocks the session, so it gets
+/// the same centered panel the pickers use — as a chat line it read as
+/// scrollback and users typed straight past it.
+fn draw_scan_offer(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cursor: usize) {
+    let theme = app.active_theme();
+    let rect = centered_rect(62, 10, area);
+
+    // Clear the popup area so the background chat text doesn't bleed through.
+    Paragraph::new("").render(rect, buf);
+
+    let block = rounded_block(theme, " primeira vez aqui ", Role::Accent);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let lines = vec![
+        Line::from(
+            styled(theme, Role::Text, format!("Escaneio {}?", repo_name(app))).add_modifier(Modifier::BOLD),
+        ),
+        Line::from(styled(theme, Role::Dim, app.repo.clone())),
+        Line::from(styled(theme, Role::Dim, format!("escrevo um {} descrevendo o diretório.", scan::CONTEXT_FILE))),
+        Line::from(""),
+        agents_line(theme, cursor == 0, "sim, escanear"),
+        agents_line(theme, cursor == 1, "não, e não perguntar de novo aqui"),
+        Line::from(""),
+        Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter confirma · s/n responde direto")),
+    ];
+    Paragraph::new(lines).render(inner, buf);
+}
+
 /// One selectable line in the agents overlay, with the shared chevron/highlight
 /// styling the other pickers use.
 fn agents_line(theme: &str, selected: bool, text: &str) -> Line<'static> {
@@ -2172,13 +2288,43 @@ mod tests {
     }
 
     #[test]
-    fn highlight_selection_reverses_cells_in_range() {
+    fn highlight_selection_paints_solid_bg_in_range() {
         let area = Rect { x: 0, y: 0, width: 10, height: 3 };
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        highlight_selection(area, &mut buf, (2, 1), (5, 1));
-        assert!(buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED));
-        assert!(buf.cell((5, 1)).unwrap().modifier.contains(Modifier::REVERSED));
-        assert!(!buf.cell((0, 0)).unwrap().modifier.contains(Modifier::REVERSED));
+        let theme = theme::DEFAULT;
+        let (bg, fg) = selection_colors(theme);
+        highlight_selection(area, &mut buf, (2, 1), (5, 1), theme);
+        // Solid background, not REVERSED: the reversed version rendered nearly
+        // invisible against these palettes.
+        assert_eq!(buf.cell((2, 1)).unwrap().bg, rgb(bg));
+        assert_eq!(buf.cell((2, 1)).unwrap().fg, rgb(fg));
+        assert_eq!(buf.cell((5, 1)).unwrap().bg, rgb(bg));
+        assert_ne!(buf.cell((0, 0)).unwrap().bg, rgb(bg), "fora do range fica intacto");
+    }
+
+    #[test]
+    fn selection_colors_keep_text_readable_on_every_theme() {
+        for name in theme::names() {
+            let (bg, fg) = selection_colors(name);
+            let luma = |c: (u8, u8, u8)| (c.0 as i32 * 299 + c.1 as i32 * 587 + c.2 as i32 * 114) / 1000;
+            assert!((luma(bg) - luma(fg)).abs() > 90, "{name}: contraste fraco entre seleção e texto");
+        }
+    }
+
+    #[test]
+    fn selection_survives_the_mouse_release_and_clears_on_next_click() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.row_text = vec!["select me please".to_string()];
+        app.mouse_down(0, 0);
+        app.mouse_drag(9, 0);
+        app.mouse_up(9, 0);
+        // Still highlighted after release — that's the visual confirmation.
+        assert!(app.selection_start.is_some() && app.selection_end.is_some());
+
+        app.mouse_down(3, 0);
+        app.mouse_up(3, 0);
+        assert!(app.selection_start.is_none(), "clique simples limpa em vez de deixar uma célula suja");
     }
 
     #[test]
@@ -2293,9 +2439,10 @@ mod tests {
         app.mouse_down(0, 0);
         app.mouse_drag(9, 0);
         app.mouse_up(9, 0);
-        assert!(app.flash.is_some());
-        assert!(app.selection_start.is_none());
-        assert!(app.selection_end.is_none());
+        let (msg, _) = app.flash.clone().expect("flash de cópia");
+        assert!(msg.contains("copiado"));
+        // Names the route used, so a failed paste points at the right suspect.
+        assert!(msg.contains("via"), "flash devia dizer por onde copiou: {msg}");
     }
 
     #[test]
@@ -2437,6 +2584,15 @@ mod tests {
         d
     }
 
+    /// Paints one frame of `app` and returns the rows as text, so a test can
+    /// assert on what an overlay actually puts on screen.
+    fn render_to_lines(app: &mut App, cols: u16, rows: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, cols, rows);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        draw(area, &mut buf, app);
+        capture_row_text(&buf)
+    }
+
     #[test]
     fn scan_offer_asks_once_then_remembers_the_no() {
         let dir = scan_tmp("offer");
@@ -2445,8 +2601,14 @@ mod tests {
         app.scanned_path = dir.join("state/scanned.yml");
 
         app.offer_scan_if_first_run();
-        assert!(matches!(app.mode, Mode::ScanOffer));
-        assert!(app.chat.iter().any(|m| m.text.contains(scan::CONTEXT_FILE)));
+        assert!(matches!(app.mode, Mode::ScanOffer { .. }));
+        // The question lives in the overlay, not in the chat log — as a log
+        // line it read as scrollback and got typed straight past.
+        assert!(!app.chat.iter().any(|m| m.text.contains(scan::CONTEXT_FILE)), "pergunta não vai pro log");
+        let painted = render_to_lines(&mut app, 100, 40);
+        assert!(painted.iter().any(|l| l.contains("Escaneio")), "overlay pergunta: {painted:?}");
+        assert!(painted.iter().any(|l| l.contains(scan::CONTEXT_FILE)));
+        assert!(painted.iter().any(|l| l.contains("sim, escanear")));
 
         app.answer_scan_offer(false);
         assert!(matches!(app.mode, Mode::Normal));
@@ -2582,6 +2744,19 @@ mod tests {
         assert_ne!(app.menu_cursor, 0);
         app.input_insert('h');
         assert_eq!(app.menu_cursor, 0);
+    }
+
+    #[test]
+    fn clipboard_helper_prefers_wayland_then_x11() {
+        let all = |_: &str| true;
+        assert_eq!(pick_clipboard_helper(true, true, all).unwrap(), vec!["wl-copy"]);
+        assert_eq!(pick_clipboard_helper(false, true, all).unwrap()[0], "xclip");
+        // Wayland session but wl-copy missing: fall through to the X11 bridge.
+        assert_eq!(pick_clipboard_helper(true, true, |b| b != "wl-copy").unwrap()[0], "xclip");
+        assert_eq!(pick_clipboard_helper(false, true, |b| b == "xsel").unwrap()[0], "xsel");
+        // Headless/ssh: no helper, OSC52 carries it alone.
+        assert!(pick_clipboard_helper(false, false, all).is_none());
+        assert!(pick_clipboard_helper(true, false, |_| false).is_none());
     }
 
     #[test]
