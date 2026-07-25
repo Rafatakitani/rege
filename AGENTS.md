@@ -68,7 +68,7 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 
 ## Trabalhando NESTE repositório (rege em si)
 
-- Rust. `cargo test` (178 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- Rust. `cargo test` (179 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
 - **`Cargo.lock` é versionado** e o `rege update` instala com `--locked`. Sem ele
   o `cargo install --git` re-resolve as 94 dependências e atualiza o índice do
   crates.io a cada update, instalando versões que ninguém testou. Commite o lock

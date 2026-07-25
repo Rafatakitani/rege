@@ -210,7 +210,10 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result
     let args = cargo_update_args(git, branch, verbose, Some(FAST_PROFILE));
     let cache = build_cache_dir(home);
     let which = branch.map(|b| format!(" ({b})")).unwrap_or_default();
-    let first = !cache.exists();
+    // Cada perfil tem seu subdiretório de artefatos: o cache raiz existir não
+    // quer dizer que o build vai ser rápido. Olhar o do perfil evita prometer
+    // "cache quente" num build de um minuto.
+    let first = !warm_cache(&cache, FAST_PROFILE);
     if first {
         println!("atualizando rege{which}… (compilando, ~1min)");
     } else {
@@ -291,6 +294,13 @@ fn report_installed_version() {
 /// cache — safe to delete, costs disk.
 fn build_cache_dir(home: &Path) -> PathBuf {
     home.join(".cache/rege/build")
+}
+
+/// Há artefatos reaproveitáveis pra este perfil? O cargo guarda cada perfil num
+/// subdiretório do target dir, então é ele que responde — e vazio conta como
+/// frio, que é o estado logo depois de criar o diretório.
+fn warm_cache(cache: &Path, profile: &str) -> bool {
+    std::fs::read_dir(cache.join(profile)).is_ok_and(|mut d| d.next().is_some())
 }
 
 fn cargo_missing(e: std::io::Error) -> ! {
@@ -450,6 +460,21 @@ mod tests {
         // Falha de compilação de verdade não deve virar fallback silencioso.
         assert!(!needs_plain_retry("error[E0308]: mismatched types"));
         assert!(!needs_plain_retry("error: profile `bench` is not defined"));
+    }
+
+    #[test]
+    fn warm_cache_looks_at_the_profile_not_the_root() {
+        let d = std::env::temp_dir().join(format!("rege-warm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(!warm_cache(&d, FAST_PROFILE), "sem o subdiretório do perfil é frio");
+        std::fs::create_dir_all(d.join(FAST_PROFILE)).unwrap();
+        assert!(!warm_cache(&d, FAST_PROFILE), "subdiretório vazio ainda é frio");
+        std::fs::write(d.join(FAST_PROFILE).join("rege"), "x").unwrap();
+        assert!(warm_cache(&d, FAST_PROFILE));
+        // O cache do outro perfil não conta.
+        assert!(!warm_cache(&d, "release"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// `--locked` exige o `Cargo.lock` versionado; se ele sair do repo todo
