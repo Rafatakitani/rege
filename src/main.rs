@@ -16,6 +16,7 @@ mod sessions;
 mod stream;
 mod theme;
 mod tmux;
+mod transcript;
 mod tui;
 mod worktree;
 
