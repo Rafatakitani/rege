@@ -195,6 +195,13 @@ struct App {
     chat_rows: usize,
     /// Total wrapped rows the conversation currently occupies.
     chat_total: usize,
+    /// When the running turn started, for the activity line. `None` = idle.
+    turn_started: Option<Instant>,
+    /// Characters streamed back this turn, the basis for the token estimate.
+    turn_chars: usize,
+    /// Frame counter, advanced every event-loop pass (~200ms) so the spinner
+    /// animates independently of how often the model sends something.
+    spinner: usize,
 }
 
 impl App {
@@ -247,6 +254,9 @@ impl App {
             scroll: 0,
             chat_rows: 0,
             chat_total: 0,
+            turn_started: None,
+            turn_chars: 0,
+            spinner: 0,
         }
     }
 
@@ -772,6 +782,8 @@ impl App {
     fn spawn_turn(&mut self, task: String) {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
+        self.turn_started = Some(Instant::now());
+        self.turn_chars = 0;
         let cli = self.master_cli.clone();
         let model = self.master_model.clone();
         let repo = self.repo.clone();
@@ -920,6 +932,7 @@ impl App {
         }
         if disconnected {
             self.rx = None;
+            self.turn_started = None;
         }
     }
 
@@ -936,7 +949,10 @@ impl App {
                 }
                 self.session_id = Some(session_id);
             }
-            stream::Event::Text(text) => self.push(ChatRole::Assistant, text),
+            stream::Event::Text(text) => {
+                self.turn_chars += text.chars().count();
+                self.push(ChatRole::Assistant, text)
+            }
             stream::Event::Tool { name, input } => self.push(ChatRole::Tool, tool_running_label(&name, &input)),
             // Result bodies (JSON, file lists, diffs) flood the master's log and
             // carry no signal here — the worker already acted on them. Collapse
@@ -949,6 +965,7 @@ impl App {
                 };
                 self.push(ChatRole::Info, line);
                 self.rx = None;
+                self.turn_started = None;
             }
         }
     }
@@ -1471,6 +1488,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                 app.flash = None;
             }
         }
+        app.spinner = app.spinner.wrapping_add(1);
         let mut rows = Vec::new();
         terminal.draw(|f| {
             draw(f.area(), f.buffer_mut(), app);
@@ -1783,6 +1801,10 @@ fn draw_header(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: 
 
 /// REGE wordmark, block letters, shown atop the chat only before the
 /// first user message — sober, no glow, just the desaturated dim tone.
+/// Buddy panel width. Named because the chat has to reserve exactly this much
+/// to avoid being painted over.
+const BUDDY_WIDTH: u16 = 24;
+
 const BANNER: [&str; 5] = [
     "████  █████ ████  █████",
     "██ ██ ██    ██    ██   ",
@@ -1791,11 +1813,20 @@ const BANNER: [&str; 5] = [
     "██ ██ █████ ████  █████",
 ];
 
+/// Width the conversation text may use. The buddy sits in the bottom-right
+/// corner and is painted *after* the messages, so without reserving its column
+/// the text ran under it and came out clipped mid-word.
+fn chat_text_width(area: Rect, app: &App) -> u16 {
+    let margins = 4;
+    let reserved = if app.buddy.is_some() { BUDDY_WIDTH + 2 } else { 0 };
+    area.width.saturating_sub(margins + reserved)
+}
+
 /// Visible rows and total wrapped rows of the chat pane, mirroring how
 /// `draw_chat`/`render_messages` lay it out. Kept next to them so the scroll
 /// clamp can't drift from what's actually on screen.
 fn chat_metrics(area: Rect, app: &App, theme: &str) -> (usize, usize) {
-    let width = area.width.saturating_sub(4);
+    let width = chat_text_width(area, app);
     let mut rows = area.height as usize;
     if !app.conversation_started() {
         // The wordmark eats the top of the pane before any message shows.
@@ -1809,7 +1840,7 @@ fn draw_chat(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &s
     let inner = Rect {
         x: area.x + 2,
         y: area.y,
-        width: area.width.saturating_sub(4),
+        width: chat_text_width(area, app),
         height: area.height,
     };
 
@@ -1845,7 +1876,7 @@ fn draw_buddy_widget(
     theme: &str,
 ) {
     let lines = buddy.render_lines(tick);
-    let width: u16 = 24;
+    let width: u16 = BUDDY_WIDTH;
     let height = (lines.len() as u16 + 3).min(area.height);
     if area.width < width + 2 || area.height < height {
         return;
@@ -2104,6 +2135,56 @@ fn draw_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &
     Paragraph::new(line).wrap(ratatui::widgets::Wrap { trim: false }).render(inner, buf);
 }
 
+/// Words for the activity line. English on purpose: it's the common language of
+/// terminal tooling, and these read as status even to someone using the rest of
+/// the UI in Portuguese. Orchestration verbs, because that's what's happening.
+const ACTIVITY_WORDS: &[&str] = &[
+    "Thinking",
+    "Delegating",
+    "Orchestrating",
+    "Dispatching",
+    "Marshalling",
+    "Pondering",
+    "Wrangling",
+    "Brewing",
+    "Herding",
+    "Conjuring",
+    "Noodling",
+    "Percolating",
+];
+
+/// Rotates every 4s so a long turn doesn't read as a hung one, and is derived
+/// from elapsed time — same second, same word, no randomness to jitter it.
+fn activity_word(elapsed_secs: u64) -> &'static str {
+    ACTIVITY_WORDS[(elapsed_secs as usize / 4) % ACTIVITY_WORDS.len()]
+}
+
+fn spinner_frame(tick: usize) -> char {
+    const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    FRAMES[tick % FRAMES.len()]
+}
+
+fn fmt_elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
+/// Rough token count from characters — the stream doesn't carry usage per
+/// chunk, and ~4 chars/token is the usual approximation. It's a progress
+/// indicator, not accounting; the real cost lands in the `Done` line.
+fn fmt_tokens(chars: usize) -> String {
+    let tokens = chars / 4;
+    if tokens >= 1000 {
+        format!("{:.1}k tokens", tokens as f64 / 1000.0)
+    } else {
+        format!("{tokens} tokens")
+    }
+}
+
 fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     if let Some((msg, ts)) = &app.flash {
         if ts.elapsed() < Duration::from_secs(2) {
@@ -2111,6 +2192,18 @@ fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, them
             Paragraph::new(line).render(area, buf);
             return;
         }
+    }
+    // A turn in flight takes over the bar: without it the UI looks frozen
+    // between the send and the first streamed token, which can be many seconds.
+    if let Some(started) = app.turn_started {
+        let elapsed = started.elapsed();
+        let line = Line::from(vec![
+            styled(theme, Role::Accent, format!("{} ", spinner_frame(app.spinner))),
+            styled(theme, Role::Text, activity_word(elapsed.as_secs())),
+            styled(theme, Role::Dim, format!("… ({} · ↓ {})", fmt_elapsed(elapsed), fmt_tokens(app.turn_chars))),
+        ]);
+        Paragraph::new(line).render(area, buf);
+        return;
     }
     let running = app.agents.iter().filter(|a| a.state == AgentState::Running).count();
     let ready = app.agents.iter().filter(|a| a.state == AgentState::Done).count();
@@ -3041,6 +3134,89 @@ mod tests {
         let row = painted2.iter().find(|l| l.contains("sim, escanear")).expect("linha do overlay");
         assert!(!row.contains("agentes"), "painel de agentes vazando: {row}");
         assert!(!row.contains('─'), "borda de outro painel vazando: {row}");
+    }
+
+    #[test]
+    fn running_turn_shows_an_activity_line() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        // The status bar is the last row; the welcome message also mentions
+        // /help, so look at the bar itself rather than the whole screen.
+        let barra = |app: &mut App| render_to_lines(app, 90, 24).last().cloned().unwrap_or_default();
+        let ocioso = barra(&mut app);
+        assert!(ocioso.contains("/help"), "parado: barra normal");
+
+        app.turn_started = Some(Instant::now());
+        app.turn_chars = 34_000;
+        let rodando = barra(&mut app);
+        assert!(rodando.contains("8.5k tokens"), "estimativa de tokens: {rodando}");
+        assert!(rodando.contains("0s"), "tempo decorrido");
+        assert!(ACTIVITY_WORDS.iter().any(|w| rodando.contains(w)), "palavra de atividade: {rodando}");
+        assert!(!rodando.contains("/help"), "a barra normal dá lugar à de atividade");
+    }
+
+    #[test]
+    fn activity_line_rotates_words_and_animates() {
+        // Same second, same word: no jitter between frames.
+        assert_eq!(activity_word(7), activity_word(7));
+        assert_ne!(activity_word(0), activity_word(4), "troca a cada 4s");
+        // Wraps instead of running off the end of the list.
+        assert_eq!(activity_word(0), activity_word(4 * ACTIVITY_WORDS.len() as u64));
+        assert_ne!(spinner_frame(0), spinner_frame(1));
+        assert_eq!(spinner_frame(0), spinner_frame(10));
+    }
+
+    #[test]
+    fn elapsed_and_tokens_read_like_a_status_line() {
+        assert_eq!(fmt_elapsed(Duration::from_secs(9)), "9s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(258)), "4m 18s");
+        assert_eq!(fmt_tokens(0), "0 tokens");
+        assert_eq!(fmt_tokens(400), "100 tokens");
+        assert_eq!(fmt_tokens(34_400), "8.6k tokens");
+    }
+
+    #[test]
+    fn turn_tracking_starts_and_stops_with_the_stream() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        assert!(app.turn_started.is_none(), "parado ao abrir");
+
+        app.turn_started = Some(Instant::now());
+        app.handle_stream_event(stream::Event::Text("abcd".into()));
+        assert_eq!(app.turn_chars, 4, "conta o que veio pra estimar tokens");
+
+        app.handle_stream_event(stream::Event::Done { cost: Some(0.01) });
+        assert!(app.turn_started.is_none(), "terminou: some a linha de atividade");
+    }
+
+    #[test]
+    fn buddy_does_not_get_painted_over_the_conversation() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        let long = "palavra ".repeat(12);
+        app.push(ChatRole::Assistant, long);
+        let sem_buddy = render_to_lines(&mut app, 100, 30);
+
+        app.buddy = Some(crate::buddy::Buddy::hatch("semente"));
+        let com_buddy = render_to_lines(&mut app, 100, 30);
+
+        // The buddy paints over the text with `Clear`, so the failure isn't
+        // overlap — it's the message silently losing characters under the panel.
+        // Wrapping can split a word across rows, so compare the whole sequence
+        // with whitespace removed, cut before the buddy's column.
+        let borda = 100 - (BUDDY_WIDTH as usize + 2);
+        let seq = |ls: &[String], cut: usize| -> String {
+            ls.iter()
+                .flat_map(|l| l.chars().take(cut))
+                .filter(|c| !c.is_whitespace())
+                .collect()
+        };
+        let esperado = "palavra".repeat(12);
+        assert!(seq(&sem_buddy, 100).contains(&esperado), "sem buddy a mensagem inteira aparece");
+        assert!(
+            seq(&com_buddy, borda).contains(&esperado),
+            "com o buddy aberto nenhum trecho pode sumir: o texto tem que reembrulhar mais estreito"
+        );
     }
 
     #[test]
