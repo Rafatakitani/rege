@@ -68,7 +68,14 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 
 ## Trabalhando NESTE repositório (rege em si)
 
-- Rust. `cargo test` (147 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- Rust. `cargo test` (154 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- **Versão**: `version` no `Cargo.toml` sobe em todo PR que muda comportamento —
+  senão `rege --version` não distingue builds e ninguém sabe se o `update` pegou.
+  O `build.rs` estampa o commit por cima (`rege 0.2.0 (b178154)`); o hash é
+  automático, o semver é manual.
+- **Overlays da TUI limpam com `Clear`**, nunca com `Paragraph::new("")` — o
+  Paragraph vazio não desenha nada e deixa o que está embaixo aparecendo através
+  do painel. Já foi bug em todos os cinco overlays de uma vez.
 - Módulos em `src/`: `config`, `command`, `worktree`, `tmux`, `agent`, `engine`,
   `session`, `mcp`, `theme`, `tui`, `buddy`, `stream`, `driver`, `sessions`, `playbook`,
   `rtk`, `scan`.

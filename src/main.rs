@@ -29,8 +29,12 @@ use std::process::Command;
 /// Upstream oficial usado por `rege update` quando nenhum `--git` é passado.
 const REGE_GIT_URL: &str = "https://github.com/Rafatakitani/rege.git";
 
+/// `0.2.0 (b178154)` — the commit is what actually tells you whether an update
+/// landed, since the semver only moves when someone bumps it by hand.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("REGE_GIT_HASH"), ")");
+
 #[derive(Parser)]
-#[command(name = "rege", version, about = "Orquestrador multi-agente de IAs")]
+#[command(name = "rege", version = VERSION, about = "Orquestrador multi-agente de IAs")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -213,7 +217,7 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result
     if verbose {
         return match Command::new("cargo").args(&args).env("CARGO_TARGET_DIR", &cache).status() {
             Ok(s) if s.success() => {
-                println!("✓ rege atualizado. `rege --version` pra conferir.");
+                report_installed_version();
                 Ok(())
             }
             Ok(s) => std::process::exit(s.code().unwrap_or(1)),
@@ -222,7 +226,7 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result
     }
     match Command::new("cargo").args(&args).env("CARGO_TARGET_DIR", &cache).output() {
         Ok(o) if o.status.success() => {
-            println!("✓ rege atualizado. `rege --version` pra conferir.");
+            report_installed_version();
             Ok(())
         }
         Ok(o) => {
@@ -231,6 +235,23 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result
             std::process::exit(o.status.code().unwrap_or(1));
         }
         Err(e) => cargo_missing(e),
+    }
+}
+
+/// Prints what actually got installed. "run `rege --version` to check" put the
+/// work on the user for information the update already has — and the commit is
+/// the part that proves the new build landed.
+fn report_installed_version() {
+    let installed = Command::new("rege")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    match installed {
+        Some(v) => println!("✓ atualizado: {v} (era {VERSION})"),
+        None => println!("✓ rege atualizado. `rege --version` pra conferir."),
     }
 }
 
