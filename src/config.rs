@@ -22,6 +22,48 @@ pub struct RosterEntry {
     pub model: Option<String>,
 }
 
+/// Knobs for the `rtk` integration (see `crate::rtk`).
+///
+/// `enabled` is tri-state on purpose: absent means "auto" — use `rtk` if the
+/// binary is on PATH. `Some(false)` is a real off switch, not a missing value.
+/// Installing hooks inside each worker's worktree is intrusive, so it sits
+/// behind its own explicit `hook_workers`, never behind autodetection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Rtk {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub hook_workers: bool,
+    /// Worker CLIs that get the hook. `rtk` supports Claude Code natively.
+    #[serde(default = "default_rtk_clis")]
+    pub clis: Vec<String>,
+    /// Argv passed to `rtk`, run with cwd = the worker's worktree. Configurable
+    /// so a future flag change in rtk needs no code edit here.
+    #[serde(default = "default_rtk_init_args")]
+    pub init_args: Vec<String>,
+}
+
+/// Hand-written so `Default` and the serde defaults can't drift apart — a
+/// derived one would give empty vectors where the YAML path gives real ones.
+impl Default for Rtk {
+    fn default() -> Self {
+        Rtk {
+            enabled: None,
+            hook_workers: false,
+            clis: default_rtk_clis(),
+            init_args: default_rtk_init_args(),
+        }
+    }
+}
+
+fn default_rtk_clis() -> Vec<String> {
+    vec!["claude".into()]
+}
+
+fn default_rtk_init_args() -> Vec<String> {
+    vec!["init".into(), "--hook-only".into()]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub master: Master,
@@ -33,6 +75,8 @@ pub struct Config {
     pub ui: BTreeMap<String, String>,
     #[serde(default)]
     pub verify: BTreeMap<String, String>,
+    #[serde(default)]
+    pub rtk: Rtk,
 }
 
 impl Default for Config {
@@ -61,6 +105,7 @@ impl Default for Config {
             sandbox: bmap(&[("enabled", true), ("yolo", true)]),
             ui: smap(&[("theme", "hacker")]),
             verify: BTreeMap::new(),
+            rtk: Rtk::default(),
         }
     }
 }

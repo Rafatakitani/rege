@@ -86,6 +86,7 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project = if is_git_repo(&cwd) { Some(cwd.as_path()) } else { None };
     let cfg = Config::load(project, &home)?;
+    rtk::configure(&cfg.rtk);
 
     match cli.cmd {
         Some(Cmd::Exec { task }) => exec(&cfg, &task.join(" ")),
@@ -253,6 +254,7 @@ fn cargo_update_args(git: &str, branch: Option<&str>, verbose: bool) -> Vec<Stri
 /// Instantiate a Session/Engine for `repo` and serve MCP over stdin/stdout.
 fn mcp_serve(home: &Path, repo: &Path) -> Result<()> {
     let cfg = Config::load(Some(repo), home)?;
+    rtk::configure(&cfg.rtk);
     let session = Session::new(repo, &cfg);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

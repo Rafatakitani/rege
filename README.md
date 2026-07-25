@@ -132,7 +132,23 @@ verify:
   command: rtk cargo test   # em vez de: cargo test
 ```
 
-Desligar: `REGE_RTK=0 rege …` (e `REGE_RTK=1` força, mesmo sem detectar o binário).
+Quem manda, do mais específico pro mais geral: **`REGE_RTK`** > **`config.yml`** >
+**autodetecção no `PATH`**.
+
+```yaml
+rtk:
+  enabled: true         # ausente = auto (usa se o binário estiver no PATH)
+  hook_workers: false   # instala o hook do rtk dentro do worktree de cada worker
+  clis: [claude]        # quais workers recebem o hook
+  init_args: [init, --hook-only]
+```
+
+`REGE_RTK=0 rege …` desliga numa execução só; `REGE_RTK=1` força mesmo sem detectar
+o binário.
+
+`hook_workers` é opt-in explícito e nunca liga por autodetecção: escrever arquivo de
+hook dentro do worktree alheio é intrusivo demais pra acontecer sozinho. Comprimir o
+diff que o rege já ia mostrar é passivo, então esse pode ser automático.
 
 ## Para IAs / agentes
 
