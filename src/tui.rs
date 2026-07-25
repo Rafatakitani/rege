@@ -111,6 +111,15 @@ enum Mode {
     AgentsPicker { cursor: usize },
     /// Text prompt for adding a roster entry by hand: `cli [role] [model]`.
     AgentsAdd { input: String },
+    /// Command list as a picker: Enter runs the highlighted command, so `/help`
+    /// is a way *into* the commands instead of a wall of text to read and retype.
+    HelpPicker { cursor: usize },
+    /// Master model, typed in. A fixed list would be a guess that rots — model
+    /// names change under us — so this shows the current one and takes a new one.
+    ModelInput { input: String },
+    /// Read-only panel for command output that used to scroll past in the log
+    /// (`/config`, `/agents ativos`). Any key closes it.
+    InfoPanel { title: String, lines: Vec<String> },
     /// First run in this directory: offer to scan it into an `AGENTS.md`.
     /// Answered with s/n or the cursor; either answer is remembered so it's
     /// asked once. `cursor` walks [sim, não] like the other pickers.
@@ -248,7 +257,10 @@ impl App {
             | Mode::ResumePicker { .. }
             | Mode::AgentsPicker { .. }
             | Mode::AgentsAdd { .. }
-            | Mode::ScanOffer { .. } => &self.theme,
+            | Mode::ScanOffer { .. }
+            | Mode::HelpPicker { .. }
+            | Mode::ModelInput { .. }
+            | Mode::InfoPanel { .. } => &self.theme,
         }
     }
 
@@ -728,6 +740,40 @@ impl App {
         self.mode = Mode::ScanOffer { cursor: 0 };
     }
 
+    fn help_picker_move(&mut self, delta: isize) {
+        let last = COMMAND_CATALOG.len().saturating_sub(1);
+        if let Mode::HelpPicker { cursor } = &mut self.mode {
+            *cursor = if delta < 0 { cursor.saturating_sub(1) } else { (*cursor + 1).min(last) };
+        }
+    }
+
+    /// Closes the overlay, then runs the highlighted command — in that order,
+    /// so a command that opens its own overlay isn't immediately overwritten.
+    fn help_picker_confirm(&mut self) {
+        let cmd = match self.mode {
+            Mode::HelpPicker { cursor } => COMMAND_CATALOG.get(cursor).map(|(c, _)| *c),
+            _ => None,
+        };
+        self.mode = Mode::Normal;
+        if let Some(cmd) = cmd {
+            self.dispatch(cmd);
+        }
+    }
+
+    fn model_input_confirm(&mut self) {
+        let name = match &self.mode {
+            Mode::ModelInput { input } => input.trim().to_string(),
+            _ => return,
+        };
+        self.mode = Mode::Normal;
+        if name.is_empty() {
+            return;
+        }
+        self.master = format!("{}/{}", self.master_cli, name);
+        self.master_model = Some(name.clone());
+        self.push(ChatRole::Info, format!("modelo do mestre: {name}"));
+    }
+
     fn scan_offer_move(&mut self, delta: isize) {
         if let Mode::ScanOffer { cursor } = &mut self.mode {
             *cursor = if delta < 0 { cursor.saturating_sub(1) } else { (*cursor + 1).min(1) };
@@ -857,29 +903,13 @@ impl App {
         let mut parts = line.split_whitespace();
         match parts.next().unwrap_or("") {
             "/quit" | "/q" => {}
-            "/help" | "/?" => {
-                self.push(ChatRole::Info, "comandos:");
-                self.push(ChatRole::Info, "  /help            esta lista");
-                self.push(ChatRole::Info, "  /theme [nome]    seletor de tema (sem arg abre picker)");
-                self.push(ChatRole::Info, "  /model [nome]    troca modelo do mestre (sem arg mostra atual)");
-                self.push(ChatRole::Info, "  /config          mostra config efetiva");
-                self.push(ChatRole::Info, "  /resume          retoma sessão anterior");
-                self.push(ChatRole::Info, "  /agents          roster de agentes (ativos: /agents ativos)");
-                self.push(ChatRole::Info, "  /scan [--force]  escaneia o diretório e escreve o AGENTS.md");
-                self.push(ChatRole::Info, "  /buddy [pet]     bicho de estimação");
-                self.push(ChatRole::Info, "  /quit            sai (ou exit/quit/:q)");
-            }
+            "/help" | "/?" => self.mode = Mode::HelpPicker { cursor: 0 },
             "/scan" => {
                 let force = parts.next() == Some("--force");
                 self.start_scan(force);
             }
             "/model" => match parts.next() {
-                None => {
-                    let cur = self.master_model.clone().unwrap_or_else(|| "(default do CLI)".into());
-                    let cli = self.master_cli.clone();
-                    self.push(ChatRole::Info, format!("mestre: {cli} · modelo: {cur}"));
-                    self.push(ChatRole::Info, "troca com: /model <nome>  (ex: /model opus, /model sonnet)");
-                }
+                None => self.mode = Mode::ModelInput { input: String::new() },
                 Some(name) => {
                     self.master_model = Some(name.to_string());
                     self.master = format!("{}/{}", self.master_cli, name);
@@ -888,18 +918,16 @@ impl App {
             },
             "/config" => {
                 let cur = self.master_model.clone().unwrap_or_else(|| "(default)".into());
-                let cli = self.master_cli.clone();
-                let theme = self.theme.clone();
-                let auto = self.auto_copy;
-                let repo = self.repo.clone();
-                let sess = self.sessions_path.display().to_string();
-                self.push(ChatRole::Info, "config efetiva:");
-                self.push(ChatRole::Info, format!("  mestre       {cli} / {cur}"));
-                self.push(ChatRole::Info, format!("  tema         {theme}"));
-                self.push(ChatRole::Info, format!("  auto_copy    {auto}"));
-                self.push(ChatRole::Info, format!("  repo         {repo}"));
-                self.push(ChatRole::Info, format!("  sessões      {sess}"));
-                self.push(ChatRole::Info, "edite ~/.config/rege/config.yml ou .rege.yml no projeto");
+                let lines = vec![
+                    format!("mestre       {} / {cur}", self.master_cli),
+                    format!("tema         {}", self.theme),
+                    format!("auto_copy    {}", self.auto_copy),
+                    format!("repo         {}", self.repo),
+                    format!("sessões      {}", self.sessions_path.display()),
+                    String::new(),
+                    "edite ~/.config/rege/config.yml ou .rege.yml no projeto".to_string(),
+                ];
+                self.mode = Mode::InfoPanel { title: " config efetiva ".to_string(), lines };
             }
             "/theme" => match parts.next() {
                 None => self.open_theme_picker(),
@@ -915,16 +943,12 @@ impl App {
                 // `/agents ativos` keeps the old inline list of running workers;
                 // bare `/agents` opens the roster overlay.
                 Some("ativos") | Some("running") => {
-                    if self.agents.is_empty() {
-                        self.push(ChatRole::Info, "nenhum agente ativo");
+                    let lines = if self.agents.is_empty() {
+                        vec!["nenhum agente ativo".to_string()]
                     } else {
-                        let names: Vec<String> = self
-                            .agents
-                            .iter()
-                            .map(|a| format!("{} ({})", a.name, a.state.label()))
-                            .collect();
-                        self.push(ChatRole::Info, names.join(", "));
-                    }
+                        self.agents.iter().map(|a| format!("{:<14} {}", a.name, a.state.label())).collect()
+                    };
+                    self.mode = Mode::InfoPanel { title: " agentes ativos ".to_string(), lines };
                 }
                 _ => self.open_agents_picker(),
             },
@@ -1330,6 +1354,30 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             KeyCode::Esc => app.agents_picker_cancel(),
                             _ => {}
                         },
+                        Mode::HelpPicker { .. } => match key.code {
+                            KeyCode::Up => app.help_picker_move(-1),
+                            KeyCode::Down => app.help_picker_move(1),
+                            KeyCode::Enter => app.help_picker_confirm(),
+                            KeyCode::Esc => app.mode = Mode::Normal,
+                            _ => {}
+                        },
+                        Mode::ModelInput { .. } => match key.code {
+                            KeyCode::Char(c) => {
+                                if let Mode::ModelInput { input } = &mut app.mode {
+                                    input.push(c);
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                if let Mode::ModelInput { input } = &mut app.mode {
+                                    input.pop();
+                                }
+                            }
+                            KeyCode::Enter => app.model_input_confirm(),
+                            KeyCode::Esc => app.mode = Mode::Normal,
+                            _ => {}
+                        },
+                        // Read-only: any key dismisses, like a "press any key" panel.
+                        Mode::InfoPanel { .. } => app.mode = Mode::Normal,
                         Mode::ScanOffer { cursor } => match key.code {
                             KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char('y') => {
                                 app.answer_scan_offer(true)
@@ -1479,6 +1527,15 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
     }
     if let Mode::ScanOffer { cursor } = app.mode {
         draw_scan_offer(area, buf, app, cursor);
+    }
+    if let Mode::HelpPicker { cursor } = app.mode {
+        draw_help_picker(area, buf, app, cursor);
+    }
+    if let Mode::ModelInput { .. } = &app.mode {
+        draw_model_input(area, buf, app);
+    }
+    if let Mode::InfoPanel { title, lines } = &app.mode {
+        draw_info_panel(area, buf, app, title, lines);
     }
     if matches!(app.mode, Mode::Normal) {
         draw_command_menu(buf, app, app.input_rect);
@@ -2009,6 +2066,73 @@ fn draw_agents_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
     Paragraph::new(lines).render(inner, buf);
 }
 
+/// `/help` as a picker rather than a printed list: Enter runs what's
+/// highlighted, so the commands are reachable from here instead of having to be
+/// read and retyped.
+fn draw_help_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cursor: usize) {
+    let theme = app.active_theme();
+    let rect = centered_rect(64, COMMAND_CATALOG.len() as u16 + 6, area);
+    Clear.render(rect, buf);
+
+    let block = rounded_block(theme, " comandos ", Role::Accent);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let mut lines = vec![
+        Line::from(styled(theme, Role::Text, "Comandos").add_modifier(Modifier::BOLD)),
+        Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter executa · Esc fecha")),
+    ];
+    for (i, (cmd, hint)) in COMMAND_CATALOG.iter().enumerate() {
+        lines.push(agents_line(theme, i == cursor, &format!("{cmd:<10} {hint}")));
+    }
+    Paragraph::new(lines).render(inner, buf);
+}
+
+/// Master model as a typed field. A fixed model list would be a guess that goes
+/// stale — the names change upstream — so this states the current one and takes
+/// whatever the user types.
+fn draw_model_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
+    let theme = app.active_theme();
+    let input = match &app.mode {
+        Mode::ModelInput { input } => input.as_str(),
+        _ => "",
+    };
+    let rect = centered_rect(60, 9, area);
+    Clear.render(rect, buf);
+
+    let block = rounded_block(theme, " modelo do mestre ", Role::Accent);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let cur = app.master_model.clone().unwrap_or_else(|| "(default do CLI)".into());
+    let lines = vec![
+        Line::from(styled(theme, Role::Text, format!("CLI: {}", app.master_cli)).add_modifier(Modifier::BOLD)),
+        Line::from(styled(theme, Role::Dim, format!("modelo atual: {cur}"))),
+        Line::from(""),
+        Line::from(vec![styled(theme, Role::Accent, "❯ "), styled(theme, Role::Text, input.to_string())]),
+        Line::from(""),
+        Line::from(styled(theme, Role::Dim, "ex: opus · sonnet · haiku · Enter aplica · Esc cancela")),
+    ];
+    Paragraph::new(lines).render(inner, buf);
+}
+
+/// Read-only panel for what used to be printed into the log and scroll away.
+fn draw_info_panel(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, title: &str, body: &[String]) {
+    let theme = app.active_theme();
+    let width = body.iter().map(|l| l.chars().count()).max().unwrap_or(20).clamp(30, 72) as u16 + 4;
+    let rect = centered_rect(width, body.len() as u16 + 4, area);
+    Clear.render(rect, buf);
+
+    let block = rounded_block(theme, title, Role::Accent);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let mut lines: Vec<Line> = body.iter().map(|l| Line::from(styled(theme, Role::Text, l.clone()))).collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(styled(theme, Role::Dim, "qualquer tecla fecha")));
+    Paragraph::new(lines).render(inner, buf);
+}
+
 /// First-run scan offer. It's a question that blocks the session, so it gets
 /// the same centered panel the pickers use — as a chat line it read as
 /// scrollback and users typed straight past it.
@@ -2231,14 +2355,23 @@ mod tests {
     }
 
     #[test]
-    fn app_dispatch_help_lists_commands() {
+    fn app_dispatch_help_opens_a_picker_that_runs_the_command() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
         app.dispatch("/help");
-        let joined: String = app.chat.iter().map(|m| m.text.clone()).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("/model"));
-        assert!(joined.contains("/config"));
-        assert!(joined.contains("/resume"));
+        assert!(matches!(app.mode, Mode::HelpPicker { .. }), "/help abre overlay, não despeja no log");
+        let painted = render_to_lines(&mut app, 90, 30);
+        for cmd in ["/model", "/config", "/resume"] {
+            assert!(painted.iter().any(|l| l.contains(cmd)), "{cmd} devia estar no painel");
+        }
+
+        // Enter runs what's highlighted — walk to /theme and confirm it opens.
+        let theme_idx = COMMAND_CATALOG.iter().position(|(c, _)| *c == "/theme").unwrap();
+        for _ in 0..theme_idx {
+            app.help_picker_move(1);
+        }
+        app.help_picker_confirm();
+        assert!(matches!(app.mode, Mode::ThemePicker { .. }), "Enter devia executar o comando destacado");
     }
 
     #[test]
@@ -2251,23 +2384,48 @@ mod tests {
     }
 
     #[test]
-    fn app_dispatch_model_no_arg_shows_current() {
+    fn app_dispatch_model_no_arg_opens_a_field_and_applies_it() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
         let before = app.master_model.clone();
         app.dispatch("/model");
-        assert!(app.chat.iter().any(|m| m.text.contains("mestre:")));
-        assert_eq!(app.master_model, before); // no-arg não muda nada
+        assert!(matches!(app.mode, Mode::ModelInput { .. }));
+        assert_eq!(app.master_model, before, "abrir o painel não muda nada");
+        let painted = render_to_lines(&mut app, 90, 30);
+        assert!(painted.iter().any(|l| l.contains("modelo atual")), "painel mostra o modelo em uso");
+
+        app.mode = Mode::ModelInput { input: " opus ".to_string() };
+        app.model_input_confirm();
+        assert_eq!(app.master_model.as_deref(), Some("opus"), "espaços são aparados");
+        assert_eq!(app.master, "claude/opus");
+        assert!(matches!(app.mode, Mode::Normal));
+
+        // Empty input is a cancel, not a model named "".
+        app.dispatch("/model");
+        app.model_input_confirm();
+        assert_eq!(app.master_model.as_deref(), Some("opus"));
     }
 
     #[test]
-    fn app_dispatch_config_shows_effective() {
+    fn app_dispatch_config_shows_effective_in_a_panel() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
         app.dispatch("/config");
-        let joined: String = app.chat.iter().map(|m| m.text.clone()).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("auto_copy"));
-        assert!(joined.contains("tema"));
+        assert!(matches!(app.mode, Mode::InfoPanel { .. }));
+        let painted = render_to_lines(&mut app, 100, 30);
+        assert!(painted.iter().any(|l| l.contains("auto_copy")));
+        assert!(painted.iter().any(|l| l.contains("tema")));
+        assert!(painted.iter().any(|l| l.contains("config efetiva")), "título no painel");
+    }
+
+    #[test]
+    fn agents_ativos_also_gets_a_panel() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.dispatch("/agents ativos");
+        let painted = render_to_lines(&mut app, 100, 30);
+        assert!(painted.iter().any(|l| l.contains("nenhum agente ativo")));
+        assert!(painted.iter().any(|l| l.contains("agentes ativos")), "título no painel");
     }
 
     #[test]
