@@ -1,8 +1,13 @@
-/.bundle/
-/vendor/bundle/
-/pkg/
-/tmp/
-*.gem
-Gemfile.lock
-.rege-runs/
 /target/
+/tmp/
+.rege-runs/
+
+# Nada de segredo entra por acidente. O push protection do GitHub é a
+# segunda linha de defesa; esta é a primeira.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+.netrc
