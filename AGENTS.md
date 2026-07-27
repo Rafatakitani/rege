@@ -68,11 +68,15 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
 
 ## Trabalhando NESTE repositório (rege em si)
 
-- Rust. `cargo test` (179 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
+- Rust. `cargo test` (185 testes) deve passar antes de commitar. `cargo fmt` + `cargo clippy`.
 - **`Cargo.lock` é versionado** e o `rege update` instala com `--locked`. Sem ele
   o `cargo install --git` re-resolve as 94 dependências e atualiza o índice do
   crates.io a cada update, instalando versões que ninguém testou. Commite o lock
   junto com o bump de versão.
+- **`update` só compila se houver commit novo.** Um `git ls-remote` responde em
+  ~1s se o remoto já está no commit estampado no binário; se estiver, o update
+  termina ali. `--force` pula a checagem. Sem rede a consulta falha em silêncio
+  e o build acontece — o cargo dá o veredito, não a otimização.
 - **`update` compila com o perfil `fastinstall`** (opt-level 1), não com o
   `release`. O que se otimiza ali é o tempo de build; o binário é IO-bound. Se o
   commit for velho demais pros flags, o `update` repete sem eles em vez de

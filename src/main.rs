@@ -75,6 +75,9 @@ enum Cmd {
         /// Mostra o output cru do cargo (compilação linha a linha).
         #[arg(long, short)]
         verbose: bool,
+        /// Recompila mesmo que o remoto esteja no commit já instalado.
+        #[arg(long, short)]
+        force: bool,
     },
     /// Escaneia o diretório atual e escreve um AGENTS.md descrevendo ele.
     Scan {
@@ -113,7 +116,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::McpServe { repo }) => mcp_serve(&home, &repo),
         Some(Cmd::Claude) => claude_orchestrator(&cfg),
-        Some(Cmd::Update { git, branch, verbose }) => update(&git, branch.as_deref(), verbose, &home),
+        Some(Cmd::Update { git, branch, verbose, force }) => update(&git, branch.as_deref(), verbose, force, &home),
         Some(Cmd::Scan { force }) => scan_dir(&cwd, &cfg, &home, force),
         Some(Cmd::Render { demo, cols, rows }) => {
             let repo = cwd.to_string_lossy().to_string();
@@ -206,7 +209,19 @@ fn claude_orchestrator(cfg: &Config) -> Result<()> {
 /// Self-update: rebuild+reinstall the `rege` binary from git via cargo. No
 /// local checkout needed — cargo clones the repo itself and overwrites the
 /// binary in `~/.cargo/bin`.
-fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result<()> {
+fn update(git: &str, branch: Option<&str>, verbose: bool, force: bool, home: &Path) -> Result<()> {
+    // O caminho mais rápido é não compilar. Uma consulta de ~1s ao remoto
+    // responde se há commit novo; sem isso o update paga um build inteiro pra
+    // reinstalar exatamente o binário que já está lá, que é o caso comum de
+    // quem roda `rege update` por hábito.
+    if !force {
+        if let Some(head) = remote_head(git, branch) {
+            if already_current(&head, env!("REGE_GIT_HASH")) {
+                println!("rege já está na última ({VERSION}). `--force` reinstala mesmo assim.");
+                return Ok(());
+            }
+        }
+    }
     let args = cargo_update_args(git, branch, verbose, Some(FAST_PROFILE));
     let cache = build_cache_dir(home);
     let which = branch.map(|b| format!(" ({b})")).unwrap_or_default();
@@ -245,6 +260,9 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result
     }
     if !ok {
         eprint!("{}", tail_lines(&err, 20));
+        if looks_like_network_failure(&err) {
+            eprintln!("o fetch do repositório não passou — sem rede, ou DNS/proxy no caminho.");
+        }
         eprintln!("falha ao atualizar. `rege update --verbose` pro output completo.");
         std::process::exit(1);
     }
@@ -257,10 +275,46 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, home: &Path) -> Result
 fn run_cargo(args: &[String], cache: &Path, verbose: bool) -> std::io::Result<(bool, String)> {
     let mut cmd = Command::new("cargo");
     cmd.args(args).env("CARGO_TARGET_DIR", cache);
+    // O libgit2 embutido no cargo resolve nome próprio e tropeça onde o git do
+    // sistema passa liso ("failed to resolve address for github.com" com a rede
+    // funcionando). Delegar o fetch ao git é a saída que o próprio cargo sugere
+    // na mensagem de erro, e de quebra reaproveita credencial e proxy já
+    // configurados.
+    cmd.env("CARGO_NET_GIT_FETCH_WITH_CLI", "true");
     if verbose {
         return cmd.status().map(|s| (s.success(), String::new()));
     }
     cmd.output().map(|o| (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned()))
+}
+
+/// O commit que o remoto entregaria, sem clonar nada. `None` quando o git não
+/// está no PATH, a rede caiu ou a ref não existe — todos casos em que a
+/// resposta certa é seguir com o build e deixar o cargo dar o veredito.
+fn remote_head(git: &str, branch: Option<&str>) -> Option<String> {
+    let out = Command::new("git").args(["ls-remote", git, branch.unwrap_or("HEAD")]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_ls_remote(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Primeiro SHA de uma saída de `git ls-remote` (`<sha>\t<ref>` por linha).
+fn parse_ls_remote(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|l| l.split_whitespace().next()).map(str::to_string).filter(|s| s.len() >= 7)
+}
+
+/// O binário rodando já é esse commit? `local` é o hash curto carimbado no
+/// build; `sem-git` (build de tarball) não prova nada e nunca dispensa o build.
+fn already_current(remote: &str, local: &str) -> bool {
+    local != "sem-git" && local.len() >= 7 && remote.starts_with(local)
+}
+
+/// Falha de rede ou de resolução de nome, não de compilação — merece uma dica
+/// diferente do "olha o log completo".
+fn looks_like_network_failure(stderr: &str) -> bool {
+    ["network failure", "failed to resolve address", "failed to fetch into", "Could not resolve host"]
+        .iter()
+        .any(|m| stderr.contains(m))
 }
 
 /// Distingue "esse commit é velho demais pros flags rápidos" de uma falha de
@@ -411,6 +465,34 @@ fn is_git_repo(dir: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ls_remote_gives_the_sha_and_ignores_the_ref() {
+        assert_eq!(parse_ls_remote("5bf8410c0d\trefs/heads/main\n"), Some("5bf8410c0d".into()));
+        // Várias linhas (branch + tag anotada): a primeira basta.
+        assert_eq!(parse_ls_remote("abc1234567\tHEAD\nzzz\trefs/tags/v1\n"), Some("abc1234567".into()));
+        assert_eq!(parse_ls_remote(""), None);
+        // Lixo curto demais pra ser SHA não passa por SHA.
+        assert_eq!(parse_ls_remote("nope\tref"), None);
+    }
+
+    #[test]
+    fn already_current_only_when_the_stamp_proves_it() {
+        assert!(already_current("5bf8410c0dfeed", "5bf8410"), "prefixo do curto bate");
+        assert!(!already_current("a47f4f1c0dfeed", "5bf8410"), "commit novo no remoto");
+        // Build sem git (tarball, vendor) não sabe onde está: nunca dispensa.
+        assert!(!already_current("5bf8410c0dfeed", "sem-git"));
+        assert!(!already_current("5bf8410c0dfeed", ""));
+    }
+
+    #[test]
+    fn network_failure_gets_its_own_hint() {
+        let real = "error: failed to fetch into: /home/u/.cargo/git/db/rege-e7e\n  network failure seems to have happened";
+        assert!(looks_like_network_failure(real));
+        assert!(looks_like_network_failure("failed to resolve address for github.com"));
+        // Erro de compilação de verdade não vira "sem rede".
+        assert!(!looks_like_network_failure("error[E0308]: mismatched types"));
+    }
 
     #[test]
     fn cargo_update_args_defaults_to_forced_quiet_git_install() {
