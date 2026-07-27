@@ -79,6 +79,12 @@ rege render --demo         # draw one TUI frame as text (headless, no tty)
 `/agents active` lists the running workers) · `/scan` · `/grill` · `/buddy` (animated
 pet) · `/quit` (or `exit`).
 Typing `/` opens an autocomplete of the commands: `↑↓` moves, `Tab` completes.
+
+**Your own skills work here.** Anything in `~/.claude/skills`, `~/.claude/commands` or
+the project's `.claude/` shows up in the same autocomplete and runs on the master —
+`/explain what a worktree is` reaches `claude` verbatim. rege only forwards names it
+found, so a typo is still a cheap error instead of a paid turn. (Master must be
+`claude`; skills are a Claude Code feature.)
 Selecting text with the mouse copies via OSC52 (works over `ssh`/`tmux` with
 passthrough); turn it off with `ui.auto_copy`.
 

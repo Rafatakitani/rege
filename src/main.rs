@@ -14,6 +14,7 @@ mod rtk;
 mod scan;
 mod session;
 mod sessions;
+mod skills;
 mod stream;
 mod theme;
 mod tmux;
