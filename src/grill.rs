@@ -11,6 +11,13 @@
 //! collected for free, then stays out of the way — the conversation is already
 //! there, and a fixed list of questions in Rust could not follow an answer
 //! where it leads.
+//!
+//! The shape of the interview is borrowed from Matt Pocock's `grilling` and
+//! `domain-modeling` agent skills: one question at a time, each carrying its own
+//! recommendation, and decisions landing as ADRs plus a glossary at the end. The
+//! script below is written from scratch, but the idea is theirs and worth
+//! naming. (`docs/adr/` as a convention predates all of it — Michael Nygard,
+//! 2011.)
 
 use crate::scan::{self, Facts};
 

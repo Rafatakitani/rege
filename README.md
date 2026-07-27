@@ -1,43 +1,44 @@
 # Rege
 
-> ⚠️ Nome provisório · projeto em desenvolvimento.
+> ⚠️ Working title · project under development.
 
-Orquestrador multi-agente de IAs, em Rust. Uma TUI de terminal onde você conversa
-com um **mestre** (modelo principal, default `claude` — trocável) que **comanda
-outros CLIs de IA** (`claude`, `codex`, `gemini`, `opencode`) como workers. O mestre
-avalia a dificuldade da tarefa, monta um time, deixa cada worker trabalhar **isolado
-num `git worktree` + sessão `tmux`**, revisa o resultado e **abre um PR** — nunca faz
-merge sozinho.
+Multi-agent AI orchestrator, in Rust. A terminal TUI where you talk to a **master**
+(the main model, `claude` by default — swappable) that **commands other AI CLIs**
+(`claude`, `codex`, `gemini`, `opencode`) as workers. The master sizes the task up,
+puts a team together, lets each worker run **isolated in a `git worktree` + `tmux`
+session**, reviews the result and **opens a PR** — it never merges on its own.
 
 ```
-você ⇄ TUI do mestre  →  mestre (claude/…) via MCP  →  Rege
-                                                          │
-                        ┌──────────────┬─────────────┬────┘
-                  worker (worktree A)  (worktree B)  (worktree C)  → review → PR
+you ⇄ master's TUI  →  master (claude/…) via MCP  →  Rege
+                                                       │
+                     ┌──────────────┬─────────────┬────┘
+               worker (worktree A)  (worktree B)  (worktree C)  → review → PR
 ```
 
-O binário é, num só processo: **servidor MCP** (expõe as ferramentas ao mestre),
-**controlador tmux/worktree** (spawna, monitora e injeta nos workers) e a **TUI**.
+In a single process, the binary is: an **MCP server** (exposing the tools to the
+master), a **tmux/worktree controller** (spawning, watching and injecting into
+workers), and the **TUI**.
 
-## ⚠️ Aviso importante
+## ⚠️ Important warning
 
-Os workers rodam **auto-aprovando** (`--dangerously-skip-permissions` / `--yolo` /
-sandbox do codex): editam arquivos, rodam comandos e commitam **sem pedir permissão**.
-Ficam confinados a um `git worktree` — a sua branch atual nunca é tocada direto, e a
-saída final é sempre um **PR pra aprovação humana**. Ainda assim: **rode só em repos
-que você controla e entende o que está sendo pedido.** Não é uma sandbox de segurança.
+Workers run **auto-approving** (`--dangerously-skip-permissions` / `--yolo` / codex's
+sandbox): they edit files, run commands and commit **without asking**. They are confined
+to a `git worktree` — your current branch is never touched directly, and the final output
+is always a **PR for human approval**. Even so: **only run this on repos you control, and
+understand what you are asking for.** It is not a security sandbox.
 
-## Requisitos
+## Requirements
 
 - Rust / Cargo
 - `git`, `tmux`
-- Pelo menos um CLI de IA instalado e autenticado. **Hoje o mestre só está 100% wired
-  para `claude`**; `codex`/`gemini`/`opencode` funcionam como workers em best-effort.
-- `gh` (opcional) autenticado, pra abrir PRs — sem ele, cai pra `.patch`.
-- [`rtk`](https://github.com/rtk-ai/rtk) (opcional) — comprime o output que entra no
-  contexto do mestre. Ver [Economia de tokens](#economia-de-tokens-rtk).
+- At least one AI CLI installed and authenticated. **Today the master is only fully
+  wired for `claude`**; `codex`/`gemini`/`opencode` work as workers on a best-effort
+  basis.
+- `gh` (optional), authenticated, to open PRs — without it, it falls back to a `.patch`.
+- [`rtk`](https://github.com/rtk-ai/rtk) (optional) — compresses the output that enters
+  the master's context. See [Token thrift](#token-thrift-rtk).
 
-## Instalação
+## Installation
 
 ```bash
 git clone https://github.com/Rafatakitani/rege.git
@@ -45,173 +46,179 @@ cd rege
 cargo install --path .
 ```
 
-Isso instala o binário `rege` em `~/.cargo/bin` (garanta que está no seu `PATH`).
+That installs the `rege` binary into `~/.cargo/bin` (make sure it is on your `PATH`).
 
-Pra atualizar depois, de qualquer diretório (sem commit novo no remoto ele
-responde na hora, sem compilar nada):
-
-```bash
-rege update            # puxa e reinstala a última versão do upstream
-rege update --branch x # ou uma branch/tag específica
-rege update --verbose  # com o output cru do cargo (default é silencioso)
-rege update --force    # recompila mesmo já estando no commit do remoto
-```
-
-## Uso
+To update later, from any directory (with no new commit on the remote it answers
+straight away, compiling nothing):
 
 ```bash
-rege                       # abre a TUI (orquestrador com chat, agentes, temas)
-rege exec "corrige o bug de login"   # headless (tipo `codex exec`), orquestra e imprime
-rege claude                # abre o claude interativo já em modo Rege (playbook+MCP)
-rege scan                  # escaneia o diretório atual e escreve o AGENTS.md
-                           # (na TUI: /scan pra ler os arquivos, /grill pra ser entrevistado)
-rege doctor                # health check do roster de CLIs + mestre atual
-rege config                # imprime a config efetiva
-rege mcp-serve --repo .    # servidor MCP puro (JSON-RPC stdio) pro repo
-rege render --demo         # desenha um frame da TUI como texto (headless, sem tty)
+rege update            # pull and reinstall the latest upstream version
+rege update --branch x # or a specific branch/tag
+rege update --verbose  # with cargo's raw output (quiet by default)
+rege update --force    # rebuild even when already on the remote's commit
 ```
 
-### Comandos da TUI
+## Usage
 
-`/help` · `/theme` (seletor com preview) · `/model <nome>` · `/config` · `/resume`
-(sessões anteriores) · `/agents` (roster: conecta/remove CLIs, grava no config;
-`/agents ativos` lista os workers rodando) · `/buddy` (bicho de estimação animado) · `/quit`
-Digitar `/` abre um autocomplete com os comandos: `↑↓` navega, `Tab` completa.
-(ou `exit`). Selecionar texto com o mouse copia via OSC52 (funciona por `ssh`/`tmux`
-com passthrough); desliga em `ui.auto_copy`.
+```bash
+rege                       # open the TUI (orchestrator with chat, agents, themes)
+rege exec "fix the login bug"   # headless (like `codex exec`): orchestrates and prints
+rege claude                # open claude interactive, already in Rege mode (playbook+MCP)
+rege scan                  # scan the current directory and write AGENTS.md
+                           # (in the TUI: /scan reads the files, /grill interviews you)
+rege doctor                # health check of the CLI roster + current master
+rege config                # print the effective config
+rege mcp-serve --repo .    # bare MCP server (JSON-RPC over stdio) for the repo
+rege render --demo         # draw one TUI frame as text (headless, no tty)
+```
 
-**Remoto:** a TUI roda em terminal, então do celular/outro device basta `ssh` (via
-Tailscale, p.ex.) + `tmux attach`. Sem app.
+### TUI commands
 
-## Contexto do diretório (`/scan` e `/grill`)
+`/help` · `/theme` (picker with live preview) · `/model <name>` · `/config` · `/resume`
+(earlier sessions) · `/agents` (roster: connect/remove CLIs, saved to the config;
+`/agents active` lists the running workers) · `/scan` · `/grill` · `/buddy` (animated
+pet) · `/quit` (or `exit`).
+Typing `/` opens an autocomplete of the commands: `↑↓` moves, `Tab` completes.
+Selecting text with the mouse copies via OSC52 (works over `ssh`/`tmux` with
+passthrough); turn it off with `ui.auto_copy`.
 
-Na primeira vez que você abre o rege num diretório, ele pergunta como quer que ele
-aprenda sobre o lugar. Dois caminhos, o mesmo destino (`AGENTS.md`):
+**Remote:** the TUI runs in a terminal, so from your phone or another device all you
+need is `ssh` (over Tailscale, say) + `tmux attach`. No app.
 
-- **`/scan`** lê o que o código já diz — git, manifestos, extensões, árvore — e escreve
-  a descrição numa chamada só. Igual ao `/init` do Claude Code.
-- **`/grill`** faz o contrário: o mestre te **entrevista**, uma pergunta por vez, sobre o
-  que você está construindo, o que já está decidido e por quê, e o que os agentes não
-  devem tocar. No fim escreve o `AGENTS.md`, um `docs/adr/NNN-*.md` por decisão que
-  apareceu, e `docs/glossary.md` quando o vocabulário vale fixar.
+## Directory context (`/scan` and `/grill`)
 
-Um `rails new` intocado é o caso claro: não tem nada pra escanear e tem tudo pra
-perguntar. Um repo com anos de história é o inverso. Os dois valem pra qualquer pasta:
-rodou em `~/`, escreve em `~/`; rodou em `/economia`, escreve lá.
+The first time you open rege in a directory, it asks how you want it to learn about the
+place. Two routes, the same destination (`AGENTS.md`):
 
-`AGENTS.md` é de propósito: claude, codex e opencode já leem esse arquivo sozinhos,
-então o contexto chega nos workers sem o rege injetar nada no prompt deles.
+- **`/scan`** reads what the code already says — git, manifests, extensions, the tree —
+  and writes the description in a single call. Like Claude Code's `/init`.
+- **`/grill`** does the opposite: the master **interviews you**, one question at a time,
+  about what you are building, what is already decided and why, and what agents must not
+  touch. At the end it writes `AGENTS.md`, one `docs/adr/NNN-*.md` per decision that came
+  up, and `docs/glossary.md` when the vocabulary is worth pinning down.
 
-Como funciona por dentro: o rege levanta os fatos sozinho (git, extensões mais comuns,
-manifestos, comandos de build/test, início do README, árvore até 2 níveis) e manda esse
-resumo pro mestre numa chamada só. O modelo interpreta um digest pronto em vez de varrer
-o disco — sai barato e funciona fora de repositório git.
+An untouched `rails new` is the clear case: nothing to scan, everything to ask. A repo
+with years of history is the reverse. Both work in any folder: run it in `~/` and it
+writes in `~/`; run it in `/economia` and it writes there.
 
-- Pergunta **uma vez por diretório**. Recusou? A resposta fica em
-  `~/.config/rege/scanned.yml` e ele não pergunta de novo ali — nada é escrito no seu
-  projeto.
-- Já existe um `AGENTS.md`? Não pergunta, e `rege scan` se recusa a sobrescrever sem
-  `--force`.
-- `/scan` e `/grill` na TUI rodam sob demanda; headless (`rege exec`, `mcp-serve`) nunca
-  pergunta.
-- A entrevista é conduzida pelo **mestre**, não por um roteiro fixo: ele já está na
-  conversa, lê o código antes de perguntar e segue a resposta pra onde ela levar. Nenhum
-  worker entra nisso.
-- Em `~/` a varredura é rasa e limitada, e o prompt avisa o modelo que aquilo é uma home,
-  não um projeto.
+`AGENTS.md` is deliberate: claude, codex and opencode already read that file on their
+own, so the context reaches the workers without rege injecting anything into their
+prompts.
 
-## Configuração
+How the scan works inside: rege gathers the facts itself (git, most common extensions,
+manifests, build/test commands, the start of the README, the tree up to 2 levels) and
+sends that summary to the master in one call. The model reads a finished digest instead
+of walking the disk — cheap, and it works outside a git repository.
 
-Camadas, deep-merge nesta ordem: defaults ← `~/.config/rege/config.yml` (global) ←
-`.rege.yml` (por projeto). Ajustável: mestre (`master.cli` / `master.model`), roster
-(papel→CLI→modelo), tema, `ui.auto_copy`, e mais.
+- Asks **once per directory**. Declined? The answer lives in
+  `~/.config/rege/scanned.yml` and it won't ask there again — nothing is written into
+  your project.
+- An `AGENTS.md` already there? It doesn't ask, and `rege scan` refuses to overwrite
+  without `--force`.
+- `/scan` and `/grill` in the TUI run on demand; headless (`rege exec`, `mcp-serve`)
+  never asks.
+- The interview is conducted by the **master**, not by a fixed script: it is already in
+  the conversation, reads the code before asking, and follows an answer where it leads.
+  No worker takes part.
+- In `~/` the walk is shallow and capped, and the prompt warns the model that this is a
+  home directory, not a project.
+
+## Configuration
+
+Layers, deep-merged in this order: defaults ← `~/.config/rege/config.yml` (global) ←
+`.rege.yml` (per project). Adjustable: master (`master.cli` / `master.model`), roster
+(role→CLI→model), theme, `ui.auto_copy`, and more.
 
 ```yaml
 # ~/.config/rege/config.yml
 master:
   cli: claude
-  model: sonnet   # escala pra opus nos passos difíceis (planner/reviewer/consult)
+  model: sonnet   # scale up to opus on the hard steps (planner/reviewer/consult)
 ui:
   theme: hacker
   auto_copy: true
 ```
 
-## Os dois modos de orquestração
+## The two orchestration modes
 
-- **Fácil** — dividir & conquistar: workers pegam partes diferentes → merge-tudo → revisão.
-- **Difícil** — redundância & juiz: vários fazem o mesmo → merge sintético → loop de
-  conserto (caça-bug, roda os testes se existirem, máx 3 rodadas).
+- **Easy** — divide & conquer: workers take different parts → merge everything → review.
+- **Hard** — redundancy & judge: several do the same thing → synthetic merge → repair
+  loop (bug hunt, run the tests if any exist, 3 rounds max).
 
-## Economia de tokens (`rtk`)
+## Token thrift (`rtk`)
 
-[`rtk`](https://github.com/rtk-ai/rtk) é um proxy de CLI que filtra o output de comandos
-antes dele virar contexto de LLM (-60% a -90% de tokens). O `rege` usa se estiver no
-`PATH`, sem configuração:
+[`rtk`](https://github.com/rtk-ai/rtk) is a CLI proxy that filters command output before
+it becomes LLM context (-60% to -90% tokens). `rege` uses it if it is on the `PATH`, with
+no configuration:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-rtk init -g            # hook do Claude Code (workers também ganham)
+rtk init -g            # Claude Code hook (workers get it too)
 rtk init -g --opencode
 rtk init -g --gemini --auto-patch
 rtk init -g --codex
 ```
 
-O que o `rege` roteia por `rtk`:
+What `rege` routes through `rtk`:
 
-| caminho | vira | por quê |
-|---------|------|---------|
-| `diff_agent` / `review` (diff da branch do worker) | `rtk git diff` | é o maior bloco que entra no contexto do mestre |
-| output dos workers (`git status`, testes, `ls`…) | hook do próprio CLI | `rtk init -g` reescreve os comandos Bash deles |
+| path | becomes | why |
+|------|---------|-----|
+| `diff_agent` / `review` (the worker branch diff) | `rtk git diff` | it is the biggest block entering the master's context |
+| worker output (`git status`, tests, `ls`…) | the CLI's own hook | `rtk init -g` rewrites their Bash commands |
 
-O que **fica cru** de propósito: o `.patch` do `open_pr` (diff condensado não aplica) e
-o git plumbing interno (`rev-parse`, `worktree`, `commit`) — ninguém lê aquilo.
+What stays **raw** on purpose: `open_pr`'s `.patch` (a condensed diff doesn't apply) and
+the internal git plumbing (`rev-parse`, `worktree`, `commit`) — nobody reads that.
 
-Pra comprimir também o `run_tests`, ponha o `rtk` no seu comando de verify:
+To compress `run_tests` too, put `rtk` in your verify command:
 
 ```yaml
 verify:
-  command: rtk cargo test   # em vez de: cargo test
+  command: rtk cargo test   # instead of: cargo test
 ```
 
-Quem manda, do mais específico pro mais geral: **`REGE_RTK`** > **`config.yml`** >
-**autodetecção no `PATH`**.
+Precedence, most specific first: **`REGE_RTK`** > **`config.yml`** > **autodetection on
+the `PATH`**.
 
 ```yaml
 rtk:
-  enabled: true         # ausente = auto (usa se o binário estiver no PATH)
-  hook_workers: false   # instala o hook do rtk dentro do worktree de cada worker
-  clis: [claude]        # quais workers recebem o hook
+  enabled: true         # absent = auto (used if the binary is on the PATH)
+  hook_workers: false   # installs rtk's hook inside each worker's worktree
+  clis: [claude]        # which workers get the hook
   init_args: [init, --hook-only]
 ```
 
-`REGE_RTK=0 rege …` desliga numa execução só; `REGE_RTK=1` força mesmo sem detectar
-o binário.
+`REGE_RTK=0 rege …` turns it off for one run; `REGE_RTK=1` forces it on even when the
+binary isn't detected.
 
-`hook_workers` é opt-in explícito e nunca liga por autodetecção: escrever arquivo de
-hook dentro do worktree alheio é intrusivo demais pra acontecer sozinho. Comprimir o
-diff que o rege já ia mostrar é passivo, então esse pode ser automático.
+`hook_workers` is explicit opt-in and never turns on by autodetection: writing a hook
+file inside somebody else's worktree is too intrusive to happen on its own. Compressing
+a diff rege was going to show anyway is passive, so that one can be automatic.
 
-## Para IAs / agentes
+## For AIs / agents
 
-Se você é um agente de IA (Claude, Codex, Gemini…) operando este repo ou usando o
-`rege` como ferramenta, leia [`AGENTS.md`](AGENTS.md) — ele diz como invocar o `rege`
-de forma headless, quais ferramentas MCP existem, e as regras (workers isolados em
-worktree, nunca fazer merge sozinho, sempre abrir PR).
+If you are an AI agent (Claude, Codex, Gemini…) operating this repo or using `rege` as a
+tool, read [`AGENTS.md`](AGENTS.md) — it covers how to invoke `rege` headless, which MCP
+tools exist, and the rules (workers isolated in worktrees, never merge on your own,
+always open a PR).
 
-## Desenvolvimento
+## Development
 
 ```bash
-cargo test    # 147 testes
+cargo test    # 192 tests
 cargo fmt && cargo clippy
 ```
 
-A maior parte da versão Rust foi construída pelo próprio Rege (dogfooding): workers
-em worktrees separados escreveram os módulos de backend. A implementação Ruby original
-está preservada na branch `legacy-ruby`. Desenho completo em
+Most of the Rust version was built by Rege itself (dogfooding): workers in separate
+worktrees wrote the backend modules. The original Ruby implementation is preserved on
+the `legacy-ruby` branch. Full design in
 `docs/superpowers/specs/2026-07-23-rege-design.md`.
 
-## Créditos & licença
+## Credits & license
 
-- MIT — veja [`LICENSE`](LICENSE).
-- O `/buddy` é um port de [ramarivera/claude-buddy](https://github.com/ramarivera/claude-buddy)
-  (MIT, © ramarivera): espécies, stats e algoritmo de geração determinística.
+- MIT — see [`LICENSE`](LICENSE).
+- `/buddy` is a port of [ramarivera/claude-buddy](https://github.com/ramarivera/claude-buddy)
+  (MIT, © ramarivera): species, stats and the deterministic generation algorithm.
+- `/grill` borrows its shape from Matt Pocock's `grilling` and `domain-modeling` agent
+  skills — one question at a time, each with a recommendation, decisions landing as ADRs
+  plus a glossary. The prompt in `src/grill.rs` is written from scratch; the idea is
+  theirs. (ADRs as a convention: Michael Nygard, 2011.)
