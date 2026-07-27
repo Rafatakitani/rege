@@ -1,6 +1,6 @@
 [package]
 name = "rege"
-version = "0.10.2"
+version = "0.10.3"
 edition = "2021"
 description = "Orquestrador multi-agente de IAs: um mestre comanda CLIs de IA isolados em git worktree + tmux."
 license = "MIT"

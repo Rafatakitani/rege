@@ -81,6 +81,7 @@ enum ChatRole {
     User,
     Assistant,
     Tool,
+    ToolResult,
     Info,
     Error,
 }
@@ -91,6 +92,7 @@ impl ChatRole {
             ChatRole::User => Role::Accent,
             ChatRole::Assistant => Role::Text,
             ChatRole::Tool => Role::Dim,
+            ChatRole::ToolResult => Role::Dim,
             ChatRole::Info => Role::Dim,
             ChatRole::Error => Role::Fail,
         }
@@ -966,10 +968,7 @@ impl App {
                 self.push(ChatRole::Assistant, text)
             }
             stream::Event::Tool { name, input } => self.push(ChatRole::Tool, tool_running_label(&name, &input)),
-            // Result bodies (JSON, file lists, diffs) flood the master's log and
-            // carry no signal here — the worker already acted on them. Collapse
-            // to a marker; the running-line above shows what ran.
-            stream::Event::ToolResult(_) => self.push(ChatRole::Info, "ran command".to_string()),
+            stream::Event::ToolResult(body) => self.push(ChatRole::ToolResult, tool_result_label(&body)),
             stream::Event::Done => {
                 self.push(ChatRole::Info, "— concluído".to_string());
                 self.rx = None;
@@ -1963,22 +1962,32 @@ fn render_messages(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, the
     Paragraph::new(visible).render(area, buf);
 }
 
-/// Compact one-line label for a running tool call. For a shell command it
-/// surfaces just the opening of the command ("running bash gh pr view 268…");
-/// for anything else, the tool name alone. Never dumps the full input.
+/// Compact one-line label for a running tool call, in the shape the Claude
+/// Code CLI itself uses: `Bash(gh pr view 268)`, `Read(src/tui.rs)`. The tool
+/// name stays as the model sent it and the argument is clipped — never the
+/// full input. A tool with nothing worth showing is just its name.
 fn tool_running_label(name: &str, input: &str) -> String {
-    let low = name.to_ascii_lowercase();
-    let detail = serde_json::from_str::<serde_json::Value>(input)
-        .ok()
-        .and_then(|v| {
-            v.get("command")
-                .or_else(|| v.get("description"))
-                .and_then(|c| c.as_str())
-                .map(str::to_string)
-        });
+    const KEYS: [&str; 7] = ["command", "file_path", "path", "pattern", "url", "query", "description"];
+    let detail = serde_json::from_str::<serde_json::Value>(input).ok().and_then(|v| {
+        KEYS.iter()
+            .find_map(|k| v.get(k).and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+    });
     match detail {
-        Some(cmd) => format!("running {low} {}", first_bit(&cmd, 50)),
-        None => format!("running {low}"),
+        Some(arg) => format!("{name}({})", first_bit(&arg, 50)),
+        None => name.to_string(),
+    }
+}
+
+/// The one line a tool result gets: its opening, clipped. The full body (JSON,
+/// file lists, diffs) would flood the master's log and carries no signal here
+/// — the worker already acted on it.
+fn tool_result_label(body: &str) -> String {
+    let bit = first_bit(body, 60);
+    if bit.is_empty() {
+        "ok".to_string()
+    } else {
+        bit
     }
 }
 
@@ -2017,19 +2026,26 @@ fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
     let (prefix, prefix_role, body_role) = match m.role {
         ChatRole::User => unreachable!("tratado acima"),
         ChatRole::Assistant => ("● ", Role::Accent, Role::Text),
-        ChatRole::Tool => ("  ⚙ ", Role::Dim, Role::Dim),
+        ChatRole::Tool => ("● ", Role::Accent2, Role::Dim),
+        ChatRole::ToolResult => ("  ⎿  ", Role::Dim, Role::Dim),
         ChatRole::Info => ("", Role::Dim, Role::Dim),
         ChatRole::Error => ("", Role::Fail, Role::Fail),
     };
     let indent_cols = prefix.chars().count();
     let budget = (width as usize).saturating_sub(indent_cols).max(1);
     let indent = " ".repeat(indent_cols);
-    wrap_text(&m.text, budget)
+    fenced_segments(&m.text, budget)
         .into_iter()
         .enumerate()
-        .map(|(i, seg)| {
+        .map(|(i, (seg, code))| {
             let gutter = if i == 0 { prefix.to_string() } else { indent.clone() };
-            let body = markdown_spans(theme, &seg, body_role);
+            // Inside a fence the text is code, not prose: no `**`/backtick
+            // parsing, or a shell one-liner loses characters to the renderer.
+            let body = if code {
+                vec![styled(theme, Role::Accent, seg)]
+            } else {
+                markdown_spans(theme, &seg, body_role)
+            };
             if gutter.is_empty() {
                 Line::from(body)
             } else {
@@ -2107,6 +2123,27 @@ fn markdown_spans(theme: &str, line: &str, body_role: Role) -> Vec<Span<'static>
         spans.push(styled(theme, body_role, String::new()));
     }
     spans
+}
+
+/// Wraps like [`wrap_text`], but first pulls ``` fences out of the text: the
+/// delimiter rows disappear and every row between them is flagged as code.
+/// Left as prose they showed up on screen as a stray `` `bash `` line and a
+/// lone backtick, which is the one markdown mark the master emits most.
+fn fenced_segments(text: &str, width: usize) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for raw in text.split('\n') {
+        if raw.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        out.extend(wrap_text(raw, width).into_iter().map(|seg| (seg, in_fence)));
+    }
+    // An empty message still owes the caller one row to hang the gutter on.
+    if out.is_empty() {
+        out.push((String::new(), false));
+    }
+    out
 }
 
 /// Splits on `\n`, then hard-wraps each line to `width` chars. Blank lines are
@@ -2745,16 +2782,40 @@ mod tests {
 
     #[test]
     fn tool_label_surfaces_command_opening_only() {
-        // Short command: shown in full.
+        // Short command: shown in full, in the CLI's own `Tool(arg)` shape.
         let short = r#"{"command":"gh pr view 268"}"#;
-        assert_eq!(tool_running_label("Bash", short), "running bash gh pr view 268");
+        assert_eq!(tool_running_label("Bash", short), "Bash(gh pr view 268)");
         // Long command: clipped to the opening with an ellipsis.
         let long = r#"{"command":"gh pr view 268 --json additions,body,files,commits,reviews"}"#;
-        assert_eq!(tool_running_label("Bash", long), "running bash gh pr view 268 --json additions,body,files,commits…");
-        // Non-bash tool with no command → name only.
-        assert_eq!(tool_running_label("mcp__rege__consult", "{}"), "running mcp__rege__consult");
+        assert_eq!(tool_running_label("Bash", long), "Bash(gh pr view 268 --json additions,body,files,commits…)");
+        // A file tool labels itself with the path it touched.
+        assert_eq!(tool_running_label("Read", r#"{"file_path":"src/tui.rs"}"#), "Read(src/tui.rs)");
+        // Nothing worth showing → name only.
+        assert_eq!(tool_running_label("mcp__rege__consult", "{}"), "mcp__rege__consult");
         // Garbage input never panics.
-        assert_eq!(tool_running_label("Bash", "not json"), "running bash");
+        assert_eq!(tool_running_label("Bash", "not json"), "Bash");
+    }
+
+    #[test]
+    fn tool_result_collapses_to_one_clipped_line() {
+        assert_eq!(tool_result_label("ok\nmais coisa\n"), "ok…");
+        assert_eq!(tool_result_label(""), "ok");
+        let flood = "x".repeat(200);
+        assert!(tool_result_label(&flood).chars().count() <= 61, "resultado nunca inunda o log");
+    }
+
+    #[test]
+    fn fenced_block_loses_the_backticks_and_keeps_the_code() {
+        let text = "instala assim:\n```bash\ncargo install --path .\n```\npronto";
+        let segs = fenced_segments(text, 80);
+        assert!(!segs.iter().any(|(s, _)| s.contains("```")), "cerca não aparece: {segs:?}");
+        assert!(!segs.iter().any(|(s, _)| s.trim() == "bash"), "a linguagem da cerca não vira linha");
+        assert_eq!(
+            segs.iter().find(|(s, _)| s.contains("cargo")).map(|(_, code)| *code),
+            Some(true),
+            "o corpo da cerca vem marcado como código"
+        );
+        assert_eq!(segs.iter().find(|(s, _)| s.contains("pronto")).map(|(_, code)| *code), Some(false));
     }
 
     #[test]
