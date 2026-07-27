@@ -1,6 +1,6 @@
 [package]
 name = "rege"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 description = "Orquestrador multi-agente de IAs: um mestre comanda CLIs de IA isolados em git worktree + tmux."
 license = "MIT"
@@ -22,19 +22,18 @@ base64 = "0.22"
 [profile.release]
 opt-level = 2
 
-# Usado só pelo `rege update`: o que se otimiza aqui é o tempo de compilação,
-# não o binário. O rege espera CLI de IA e escreve na tela — é IO-bound, e
-# opt-level 1 corta o build quase pela metade sem custo perceptível. O
-# `release` (o que vai empacotado) segue intacto.
+# Used only by `rege update`: what gets optimized here is compile time, not the
+# binary. rege waits on AI CLIs and paints a screen — it is IO-bound, and
+# opt-level 1 nearly halves the build at no perceptible cost. The `release`
+# profile (the one that ships) stays intact.
 #
-# O resto é tempo de build puro, sem mexer em semântica: mais unidades de
-# codegen pra ocupar todos os cores (o `release` usa 16 e deixa máquina parada)
-# e strip, porque escrever tabela de símbolo é tempo de link que ninguém vai
-# usar. `incremental` fica de fora: o `cargo install --git` clona num diretório
-# novo a cada vez, então não há estado incremental que sobreviva de um update
-# pro outro — só o custo de gravá-lo.
-# `panic` fica de fora de propósito: mudar isso faria o binário instalado pelo
-# update se comportar diferente do empacotado.
+# The rest is pure build time, with no change in semantics: more codegen units
+# to keep every core busy (`release` uses 16 and leaves the machine idle), and
+# strip, because writing a symbol table is link time nobody will spend. Left
+# out on purpose: `incremental`, since `cargo install --git` clones into a fresh
+# directory every time and no incremental state survives from one update to the
+# next — only the cost of writing it; and `panic`, since changing it would make
+# the binary installed by `update` behave differently from the packaged one.
 [profile.fastinstall]
 inherits = "release"
 opt-level = 1
