@@ -64,6 +64,7 @@ rege                       # abre a TUI (orquestrador com chat, agentes, temas)
 rege exec "corrige o bug de login"   # headless (tipo `codex exec`), orquestra e imprime
 rege claude                # abre o claude interativo já em modo Rege (playbook+MCP)
 rege scan                  # escaneia o diretório atual e escreve o AGENTS.md
+                           # (na TUI: /scan pra ler os arquivos, /grill pra ser entrevistado)
 rege doctor                # health check do roster de CLIs + mestre atual
 rege config                # imprime a config efetiva
 rege mcp-serve --repo .    # servidor MCP puro (JSON-RPC stdio) pro repo
@@ -82,11 +83,21 @@ com passthrough); desliga em `ui.auto_copy`.
 **Remoto:** a TUI roda em terminal, então do celular/outro device basta `ssh` (via
 Tailscale, p.ex.) + `tmux attach`. Sem app.
 
-## Contexto do diretório (`rege scan`)
+## Contexto do diretório (`/scan` e `/grill`)
 
-Na primeira vez que você abre o rege num diretório, ele pergunta se pode escanear e
-escrever um `AGENTS.md` descrevendo o lugar — igual ao `/init` do Claude Code. Vale pra
-qualquer pasta: rodou em `~/`, escreve em `~/`; rodou em `/economia`, escreve lá.
+Na primeira vez que você abre o rege num diretório, ele pergunta como quer que ele
+aprenda sobre o lugar. Dois caminhos, o mesmo destino (`AGENTS.md`):
+
+- **`/scan`** lê o que o código já diz — git, manifestos, extensões, árvore — e escreve
+  a descrição numa chamada só. Igual ao `/init` do Claude Code.
+- **`/grill`** faz o contrário: o mestre te **entrevista**, uma pergunta por vez, sobre o
+  que você está construindo, o que já está decidido e por quê, e o que os agentes não
+  devem tocar. No fim escreve o `AGENTS.md`, um `docs/adr/NNN-*.md` por decisão que
+  apareceu, e `docs/glossary.md` quando o vocabulário vale fixar.
+
+Um `rails new` intocado é o caso claro: não tem nada pra escanear e tem tudo pra
+perguntar. Um repo com anos de história é o inverso. Os dois valem pra qualquer pasta:
+rodou em `~/`, escreve em `~/`; rodou em `/economia`, escreve lá.
 
 `AGENTS.md` é de propósito: claude, codex e opencode já leem esse arquivo sozinhos,
 então o contexto chega nos workers sem o rege injetar nada no prompt deles.
@@ -101,7 +112,11 @@ o disco — sai barato e funciona fora de repositório git.
   projeto.
 - Já existe um `AGENTS.md`? Não pergunta, e `rege scan` se recusa a sobrescrever sem
   `--force`.
-- `/scan` na TUI roda sob demanda; headless (`rege exec`, `mcp-serve`) nunca pergunta.
+- `/scan` e `/grill` na TUI rodam sob demanda; headless (`rege exec`, `mcp-serve`) nunca
+  pergunta.
+- A entrevista é conduzida pelo **mestre**, não por um roteiro fixo: ele já está na
+  conversa, lê o código antes de perguntar e segue a resposta pra onde ela levar. Nenhum
+  worker entra nisso.
 - Em `~/` a varredura é rasa e limitada, e o prompt avisa o modelo que aquilo é uma home,
   não um projeto.
 
