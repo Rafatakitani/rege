@@ -47,12 +47,14 @@ cargo install --path .
 
 Isso instala o binário `rege` em `~/.cargo/bin` (garanta que está no seu `PATH`).
 
-Pra atualizar depois, de qualquer diretório:
+Pra atualizar depois, de qualquer diretório (sem commit novo no remoto ele
+responde na hora, sem compilar nada):
 
 ```bash
 rege update            # puxa e reinstala a última versão do upstream
 rege update --branch x # ou uma branch/tag específica
 rege update --verbose  # com o output cru do cargo (default é silencioso)
+rege update --force    # recompila mesmo já estando no commit do remoto
 ```
 
 ## Uso

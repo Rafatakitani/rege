@@ -1,6 +1,6 @@
 [package]
 name = "rege"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "Orquestrador multi-agente de IAs: um mestre comanda CLIs de IA isolados em git worktree + tmux."
 license = "MIT"
@@ -26,6 +26,19 @@ opt-level = 2
 # não o binário. O rege espera CLI de IA e escreve na tela — é IO-bound, e
 # opt-level 1 corta o build quase pela metade sem custo perceptível. O
 # `release` (o que vai empacotado) segue intacto.
+#
+# O resto é tempo de build puro, sem mexer em semântica: mais unidades de
+# codegen pra ocupar todos os cores (o `release` usa 16 e deixa máquina parada)
+# e strip, porque escrever tabela de símbolo é tempo de link que ninguém vai
+# usar. `incremental` fica de fora: o `cargo install --git` clona num diretório
+# novo a cada vez, então não há estado incremental que sobreviva de um update
+# pro outro — só o custo de gravá-lo.
+# `panic` fica de fora de propósito: mudar isso faria o binário instalado pelo
+# update se comportar diferente do empacotado.
 [profile.fastinstall]
 inherits = "release"
 opt-level = 1
+codegen-units = 256
+lto = false
+debug = false
+strip = true
