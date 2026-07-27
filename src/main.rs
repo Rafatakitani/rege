@@ -27,11 +27,11 @@ use session::Session;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Upstream oficial usado por `rege update` quando nenhum `--git` é passado.
+/// Official upstream used by `rege update` when no `--git` is given.
 const REGE_GIT_URL: &str = "https://github.com/Rafatakitani/rege.git";
 
-/// Perfil de build usado só pelo `update` (ver `[profile.fastinstall]` no
-/// `Cargo.toml`): otimiza tempo de compilação, não o binário.
+/// Build profile used only by `update` (see `[profile.fastinstall]` in
+/// `Cargo.toml`): it optimizes build time, not the binary.
 const FAST_PROFILE: &str = "fastinstall";
 
 /// `0.2.0 (b178154)` — the commit is what actually tells you whether an update
@@ -210,24 +210,31 @@ fn claude_orchestrator(cfg: &Config) -> Result<()> {
 /// local checkout needed — cargo clones the repo itself and overwrites the
 /// binary in `~/.cargo/bin`.
 fn update(git: &str, branch: Option<&str>, verbose: bool, force: bool, home: &Path) -> Result<()> {
-    // O caminho mais rápido é não compilar. Uma consulta de ~1s ao remoto
-    // responde se há commit novo; sem isso o update paga um build inteiro pra
-    // reinstalar exatamente o binário que já está lá, que é o caso comum de
-    // quem roda `rege update` por hábito.
-    if !force {
-        if let Some(head) = remote_head(git, branch) {
-            if already_current(&head, env!("REGE_GIT_HASH")) {
-                println!("rege já está na última ({VERSION}). `--force` reinstala mesmo assim.");
-                return Ok(());
-            }
+    // The fastest build is the one that doesn't run. A ~1s query answers
+    // whether there is a new commit at all; without it, `rege update` pays a
+    // full build to reinstall the very binary already in place — which is what
+    // running it out of habit does.
+    match remote_head(git, branch) {
+        Probe::Sha(head) if !force && already_current(&head, env!("REGE_GIT_HASH")) => {
+            println!("rege já está na última ({VERSION}). `--force` reinstala mesmo assim.");
+            return Ok(());
         }
+        // No network now means no network for cargo's own fetch either: the
+        // clone is the first thing it does. Saying so costs a second, where
+        // letting cargo find out costs a minute of stalled fetch.
+        Probe::Offline => {
+            eprintln!("sem rede: não deu pra falar com {git}.");
+            eprintln!("o update precisa buscar o repositório — tente de novo quando a conexão voltar.");
+            std::process::exit(1);
+        }
+        _ => {}
     }
     let args = cargo_update_args(git, branch, verbose, Some(FAST_PROFILE));
     let cache = build_cache_dir(home);
     let which = branch.map(|b| format!(" ({b})")).unwrap_or_default();
-    // Cada perfil tem seu subdiretório de artefatos: o cache raiz existir não
-    // quer dizer que o build vai ser rápido. Olhar o do perfil evita prometer
-    // "cache quente" num build de um minuto.
+    // Each profile gets its own artifact subdirectory: the cache root existing
+    // says nothing about how fast this build will be. Checking the profile's
+    // own directory avoids promising "warm cache" on a one-minute build.
     let first = !warm_cache(&cache, FAST_PROFILE);
     if first {
         println!("atualizando rege{which}… (compilando, ~1min)");
@@ -240,8 +247,8 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, force: bool, home: &Pa
     if verbose {
         let ok = run_cargo(&args, &cache, true).map_or_else(|e| cargo_missing(e), |(ok, _)| ok);
         if !ok {
-            // Sem output capturado pra inspecionar, então a segunda tentativa
-            // é incondicional: no pior caso o erro real aparece duas vezes.
+            // Nothing was captured to inspect, so the retry is unconditional:
+            // worst case the real error is printed twice.
             let plain = cargo_update_args(git, branch, verbose, None);
             let ok = run_cargo(&plain, &cache, true).map_or_else(|e| cargo_missing(e), |(ok, _)| ok);
             if !ok {
@@ -253,8 +260,8 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, force: bool, home: &Pa
     }
     let (mut ok, mut err) = run_cargo(&args, &cache, false).unwrap_or_else(|e| cargo_missing(e));
     if !ok && needs_plain_retry(&err) {
-        // Commit antigo, sem o perfil no Cargo.toml (ou sem Cargo.lock). Cai
-        // pro release em vez de deixar o update quebrado por otimização.
+        // Old commit, no such profile in its Cargo.toml (or no Cargo.lock).
+        // Fall back to release rather than let an optimization break updates.
         let plain = cargo_update_args(git, branch, verbose, None);
         (ok, err) = run_cargo(&plain, &cache, false).unwrap_or_else(|e| cargo_missing(e));
     }
@@ -275,11 +282,10 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, force: bool, home: &Pa
 fn run_cargo(args: &[String], cache: &Path, verbose: bool) -> std::io::Result<(bool, String)> {
     let mut cmd = Command::new("cargo");
     cmd.args(args).env("CARGO_TARGET_DIR", cache);
-    // O libgit2 embutido no cargo resolve nome próprio e tropeça onde o git do
-    // sistema passa liso ("failed to resolve address for github.com" com a rede
-    // funcionando). Delegar o fetch ao git é a saída que o próprio cargo sugere
-    // na mensagem de erro, e de quebra reaproveita credencial e proxy já
-    // configurados.
+    // Cargo's bundled libgit2 does its own name resolution and trips where the
+    // system git sails through ("failed to resolve address for github.com" on a
+    // working network). Delegating the fetch is what cargo itself suggests in
+    // that error, and it reuses credentials and proxies already configured.
     cmd.env("CARGO_NET_GIT_FETCH_WITH_CLI", "true");
     if verbose {
         return cmd.status().map(|s| (s.success(), String::new()));
@@ -287,15 +293,39 @@ fn run_cargo(args: &[String], cache: &Path, verbose: bool) -> std::io::Result<(b
     cmd.output().map(|o| (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned()))
 }
 
-/// O commit que o remoto entregaria, sem clonar nada. `None` quando o git não
-/// está no PATH, a rede caiu ou a ref não existe — todos casos em que a
-/// resposta certa é seguir com o build e deixar o cargo dar o veredito.
-fn remote_head(git: &str, branch: Option<&str>) -> Option<String> {
-    let out = Command::new("git").args(["ls-remote", git, branch.unwrap_or("HEAD")]).output().ok()?;
+/// What asking the remote told us. `Unknown` covers git missing from PATH, a
+/// ref that doesn't exist, an auth prompt — cases where the build should go
+/// ahead and let cargo deliver the verdict. `Offline` is separated out because
+/// there the build is guaranteed to fail too, only a minute later.
+#[derive(Debug, PartialEq)]
+enum Probe {
+    Sha(String),
+    Offline,
+    Unknown,
+}
+
+/// The commit the remote would hand over, without cloning anything.
+fn remote_head(git: &str, branch: Option<&str>) -> Probe {
+    let Ok(out) = Command::new("git").args(["ls-remote", git, branch.unwrap_or("HEAD")]).output() else {
+        return Probe::Unknown;
+    };
     if !out.status.success() {
-        return None;
+        return classify_ls_remote_failure(&String::from_utf8_lossy(&out.stderr));
     }
-    parse_ls_remote(&String::from_utf8_lossy(&out.stdout))
+    match parse_ls_remote(&String::from_utf8_lossy(&out.stdout)) {
+        Some(sha) => Probe::Sha(sha),
+        None => Probe::Unknown,
+    }
+}
+
+/// A failed `ls-remote` is only worth aborting on when the network is the
+/// reason. Anything else (missing ref, credentials) is cargo's call to make.
+fn classify_ls_remote_failure(stderr: &str) -> Probe {
+    if looks_like_network_failure(stderr) {
+        Probe::Offline
+    } else {
+        Probe::Unknown
+    }
 }
 
 /// Primeiro SHA de uma saída de `git ls-remote` (`<sha>\t<ref>` por linha).
@@ -312,7 +342,16 @@ fn already_current(remote: &str, local: &str) -> bool {
 /// Falha de rede ou de resolução de nome, não de compilação — merece uma dica
 /// diferente do "olha o log completo".
 fn looks_like_network_failure(stderr: &str) -> bool {
-    ["network failure", "failed to resolve address", "failed to fetch into", "Could not resolve host"]
+    [
+        "network failure",
+        "failed to resolve address",
+        "failed to fetch into",
+        "Could not resolve host",
+        "Name or service not known",
+        "Could not read from remote repository",
+        "Connection timed out",
+        "Network is unreachable",
+    ]
         .iter()
         .any(|m| stderr.contains(m))
 }
@@ -383,11 +422,11 @@ fn cargo_update_args(git: &str, branch: Option<&str>, verbose: bool, profile: Op
         a.push(b.to_string());
     }
     if let Some(p) = profile {
-        // `--locked` anda junto com o perfil rápido: sem ele o cargo re-resolve
-        // as 94 dependências e atualiza o índice do crates.io a cada update —
-        // caro, e instala versões que ninguém testou. Ambos dependem de o
-        // commit ser recente (perfil + Cargo.lock no repo), e ambos caem juntos
-        // no fallback se não for.
+        // `--locked` travels with the fast profile: without it cargo re-resolves
+        // all 94 dependencies and refreshes the crates.io index on every update
+        // — expensive, and it installs versions nobody tested. Both need a
+        // recent commit (profile + Cargo.lock in the repo), and both drop
+        // together in the fallback when it isn't.
         a.push("--profile".to_string());
         a.push(p.to_string());
         a.push("--locked".to_string());
@@ -472,15 +511,31 @@ mod tests {
         // Várias linhas (branch + tag anotada): a primeira basta.
         assert_eq!(parse_ls_remote("abc1234567\tHEAD\nzzz\trefs/tags/v1\n"), Some("abc1234567".into()));
         assert_eq!(parse_ls_remote(""), None);
-        // Lixo curto demais pra ser SHA não passa por SHA.
+        // Junk too short to be a SHA doesn't get to pass for one.
         assert_eq!(parse_ls_remote("nope\tref"), None);
+    }
+
+    #[test]
+    fn offline_is_told_apart_from_a_ref_that_does_not_exist() {
+        // Aborting is only right when cargo's own fetch is doomed too.
+        assert_eq!(
+            classify_ls_remote_failure("fatal: unable to access 'https://x/': Could not resolve host: github.com"),
+            Probe::Offline
+        );
+        assert_eq!(
+            classify_ls_remote_failure("ssh: Could not resolve hostname github.com: Name or service not known"),
+            Probe::Offline
+        );
+        // Auth or a missing ref: let cargo decide, same as before.
+        assert_eq!(classify_ls_remote_failure("fatal: Authentication failed"), Probe::Unknown);
+        assert_eq!(classify_ls_remote_failure(""), Probe::Unknown);
     }
 
     #[test]
     fn already_current_only_when_the_stamp_proves_it() {
         assert!(already_current("5bf8410c0dfeed", "5bf8410"), "prefixo do curto bate");
         assert!(!already_current("a47f4f1c0dfeed", "5bf8410"), "commit novo no remoto");
-        // Build sem git (tarball, vendor) não sabe onde está: nunca dispensa.
+        // A build with no git (tarball, vendor) can't know where it stands.
         assert!(!already_current("5bf8410c0dfeed", "sem-git"));
         assert!(!already_current("5bf8410c0dfeed", ""));
     }
@@ -490,7 +545,7 @@ mod tests {
         let real = "error: failed to fetch into: /home/u/.cargo/git/db/rege-e7e\n  network failure seems to have happened";
         assert!(looks_like_network_failure(real));
         assert!(looks_like_network_failure("failed to resolve address for github.com"));
-        // Erro de compilação de verdade não vira "sem rede".
+        // A real compile error must not turn into "no network".
         assert!(!looks_like_network_failure("error[E0308]: mismatched types"));
     }
 
@@ -539,7 +594,7 @@ mod tests {
     fn plain_retry_only_for_the_old_commit_case() {
         assert!(needs_plain_retry("error: profile `fastinstall` is not defined"));
         assert!(needs_plain_retry("error: the lock file needs to be updated but --locked was passed"));
-        // Falha de compilação de verdade não deve virar fallback silencioso.
+        // A real compile failure must not turn into a silent fallback.
         assert!(!needs_plain_retry("error[E0308]: mismatched types"));
         assert!(!needs_plain_retry("error: profile `bench` is not defined"));
     }
@@ -554,7 +609,7 @@ mod tests {
         assert!(!warm_cache(&d, FAST_PROFILE), "subdiretório vazio ainda é frio");
         std::fs::write(d.join(FAST_PROFILE).join("rege"), "x").unwrap();
         assert!(warm_cache(&d, FAST_PROFILE));
-        // O cache do outro perfil não conta.
+        // Another profile's cache doesn't count.
         assert!(!warm_cache(&d, "release"));
         let _ = std::fs::remove_dir_all(&d);
     }
