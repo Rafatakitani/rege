@@ -362,7 +362,7 @@ impl App {
     }
 
     fn open_resume_picker(&mut self) {
-        self.resume_list = sessions::recent(&self.sessions_path, 12);
+        self.resume_list = sessions::recent_for(&self.sessions_path, &self.repo, 12);
         self.mode = Mode::ResumePicker { cursor: 0 };
     }
 
