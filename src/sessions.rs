@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_RECORDS: usize = 50;
+/// The file is shared by every repo and `/resume` only shows the current one's
+/// sessions, so the cap has to hold several repos' history at once.
+const MAX_RECORDS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionRec {
@@ -48,8 +50,11 @@ pub fn add(path: &Path, rec: SessionRec) {
     }
 }
 
-pub fn recent(path: &Path, n: usize) -> Vec<SessionRec> {
-    load(path).into_iter().take(n).collect()
+/// Most recent sessions started in `repo`. The file is shared by every repo,
+/// and a session only resumes inside the directory it was started in, so
+/// offering another repo's sessions was offering broken resumes.
+pub fn recent_for(path: &Path, repo: &str, n: usize) -> Vec<SessionRec> {
+    load(path).into_iter().filter(|r| r.repo == repo).take(n).collect()
 }
 
 #[cfg(test)]
@@ -90,15 +95,16 @@ mod tests {
     }
 
     #[test]
-    fn add_caps_at_50_most_recent() {
+    fn add_caps_at_max_records_most_recent() {
         let path = tmp("cap");
-        for i in 0..60u64 {
+        let total = MAX_RECORDS as u64 + 10;
+        for i in 0..total {
             add(&path, rec(&format!("s{i}"), i));
         }
         let loaded = load(&path);
-        assert_eq!(loaded.len(), 50);
-        assert_eq!(loaded[0].id, "s59");
-        assert_eq!(loaded[49].id, "s10");
+        assert_eq!(loaded.len(), MAX_RECORDS);
+        assert_eq!(loaded[0].id, format!("s{}", total - 1));
+        assert_eq!(loaded[MAX_RECORDS - 1].id, "s10");
     }
 
     #[test]
@@ -107,8 +113,23 @@ mod tests {
         for i in 0..5u64 {
             add(&path, rec(&format!("s{i}"), i));
         }
-        let r = recent(&path, 3);
+        let r = recent_for(&path, "/repo", 3);
         assert_eq!(r.len(), 3);
         assert_eq!(r[0].id, "s4");
+    }
+
+    /// One shared file, many repos: `/resume` in one repo must not offer
+    /// sessions started in another — resuming them there doesn't work.
+    #[test]
+    fn recent_only_returns_sessions_from_the_asked_repo() {
+        let path = tmp("by-repo");
+        add(&path, rec("a", 1));
+        add(&path, SessionRec { id: "b".into(), title: "outro".into(), repo: "/other".into(), ts: 2 });
+        add(&path, rec("c", 3));
+        let mine: Vec<_> = recent_for(&path, "/repo", 12).into_iter().map(|r| r.id).collect();
+        assert_eq!(mine, ["c", "a"]);
+        let theirs: Vec<_> = recent_for(&path, "/other", 12).into_iter().map(|r| r.id).collect();
+        assert_eq!(theirs, ["b"]);
+        assert!(recent_for(&path, "/nowhere", 12).is_empty());
     }
 }
