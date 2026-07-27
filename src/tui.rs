@@ -2819,7 +2819,7 @@ fn draw_agents_add(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
 /// nothing when the menu is closed (input isn't a bare `/prefix`).
 /// Rows the command popup shows at once. A full skill roster is 40+ entries;
 /// covering the whole chat with them is worse than scrolling a short window.
-const MENU_MAX_ROWS: usize = 10;
+const MENU_MAX_ROWS: usize = 7;
 
 fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: Rect) {
     let menu = app.command_menu();
