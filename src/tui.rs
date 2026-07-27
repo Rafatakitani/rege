@@ -2823,21 +2823,38 @@ fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: R
         return;
     }
     let theme = app.active_theme();
-    let height = menu.len() as u16 + 2; // borders
-    // Sit directly above the input; clamp so it never overflows the top edge.
-    let y = input_rect.y.saturating_sub(height);
+    // The popup sits above the input, so the rows above it are all the room it
+    // gets. Without this clamp a long menu (rege's commands plus the user's
+    // skills) drew past the bottom of the buffer and panicked ratatui.
+    let max_rows = input_rect.y.saturating_sub(2);
+    if max_rows == 0 {
+        return;
+    }
+    let visible = menu.len().min(max_rows as usize);
+    let height = visible as u16 + 2; // borders
+    let y = input_rect.y - height;
     let width = input_rect.width.min(66).max(24);
     let rect = Rect { x: input_rect.x, y, width, height };
 
+    let cursor = app.menu_selected(menu.len());
+    // Scroll the window so the highlighted row is always on screen.
+    let offset = cursor.saturating_sub(visible.saturating_sub(1)).min(menu.len() - visible);
+
     Clear.render(rect, buf); // real clear: an empty Paragraph leaves cells intact
-    let block = rounded_block(theme, " commands ", Role::Dim);
+    let title = if visible < menu.len() {
+        format!(" commands {}/{} ", cursor + 1, menu.len())
+    } else {
+        " commands ".to_string()
+    };
+    let block = rounded_block(theme, &title, Role::Dim);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
-    let cursor = app.menu_selected(menu.len());
     let lines: Vec<Line> = menu
         .iter()
         .enumerate()
+        .skip(offset)
+        .take(visible)
         .map(|(i, row)| {
             let (cmd, desc) = (row.cmd.as_str(), row.hint.as_str());
             let selected = i == cursor;
@@ -3462,6 +3479,29 @@ mod tests {
         assert_eq!(app.roster.len(), before, "roster unchanged on unknown cli");
         assert!(matches!(app.mode, Mode::AgentsPicker { .. }));
         assert!(app.chat.iter().any(|m| matches!(m.role, ChatRole::Error)));
+    }
+
+    /// A user with many skills used to blow past the bottom of the buffer: the
+    /// popup was menu.len()+2 rows tall no matter how much room sat above the
+    /// input, and ratatui panicked on the first out-of-area cell.
+    #[test]
+    fn command_menu_popup_fits_when_menu_is_taller_than_the_screen() {
+        use ratatui::backend::TestBackend;
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.skills = (0..200).map(|i| format!("skill{i}")).collect();
+        app.input = "/".into();
+        app.menu_cursor = 150; // scrolled deep into the list
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test backend");
+        terminal
+            .draw(|f| {
+                draw(f.area(), f.buffer_mut(), &mut app);
+                let rows = capture_row_text(f.buffer_mut());
+                // The highlighted row is on screen, and nothing panicked.
+                assert!(rows.iter().any(|r| r.contains("/skill")), "popup rendered");
+                assert!(rows.iter().any(|r| r.contains("commands ")), "count in the title");
+            })
+            .expect("draw");
     }
 
     #[test]
