@@ -168,7 +168,7 @@ fn run_tmux(args: &[&str]) -> Result<()> {
     let output = Command::new("tmux").args(args).output()?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("tmux {} falhou: {}", args.first().unwrap_or(&""), err));
+        return Err(anyhow!("tmux {} failed: {}", args.first().unwrap_or(&""), err));
     }
     Ok(())
 }
@@ -195,7 +195,7 @@ mod tests {
     macro_rules! skip_if_no_tmux {
         () => {
             if !tmux_available() {
-                eprintln!("skip: tmux nao instalado");
+                eprintln!("skip: tmux not installed");
                 return;
             }
         };

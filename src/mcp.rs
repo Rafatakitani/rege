@@ -20,7 +20,7 @@ pub fn definitions() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "spawn_agent",
-            description: "Dispara um worker (CLI de IA) isolado num git worktree pra uma tarefa.",
+            description: "Dispatch a worker (AI CLI) isolated in a git worktree to work on a task.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -34,12 +34,12 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_agents",
-            description: "Lista os agentes e seus estados.",
+            description: "List the agents and their states.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: "agent_status",
-            description: "Estado atual de um agente.",
+            description: "Current state of one agent.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "agent_id": { "type": "string" } },
@@ -48,7 +48,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_agent",
-            description: "Bloqueia ate o agente terminar (ou timeout em s) e commita o trabalho. Use apos spawn_agent.",
+            description: "Block until the agent finishes (or timeout in s) and commit its work. Use after spawn_agent.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "agent_id": { "type": "string" }, "timeout": { "type": "integer" } },
@@ -57,7 +57,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_output",
-            description: "Saida acumulada de um agente.",
+            description: "Accumulated output of one agent.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "agent_id": { "type": "string" } },
@@ -66,7 +66,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Injeta texto na sessao de um agente (redirecionar / cochichar / takeover).",
+            description: "Inject text into an agent's session (redirect / whisper / take over).",
             input_schema: json!({
                 "type": "object",
                 "properties": { "agent_id": { "type": "string" }, "text": { "type": "string" } },
@@ -75,7 +75,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "kill_agent",
-            description: "Mata a sessao de um agente.",
+            description: "Kill an agent's session.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "agent_id": { "type": "string" } },
@@ -84,7 +84,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "diff_agent",
-            description: "Diff da branch de um agente.",
+            description: "Diff of an agent's branch.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "agent_id": { "type": "string" } },
@@ -93,7 +93,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "review",
-            description: "Monta o contexto de revisao: diffs das branches dos agentes dados.",
+            description: "Build the review context: diffs of the given agents' branches.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "agent_ids": { "type": "array", "items": { "type": "string" } } },
@@ -102,7 +102,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "run_tests",
-            description: "Roda o comando de verify no worktree do agente (se configurado).",
+            description: "Run the verify command in the agent's worktree (if configured).",
             input_schema: json!({
                 "type": "object",
                 "properties": { "agent_id": { "type": "string" } },
@@ -111,7 +111,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "consult",
-            description: "Pergunta pontual a um modelo mais forte (ex: opus) sem spawnar worker. Escalacao de raciocinio.",
+            description: "One-off question to a stronger model (e.g. opus) without spawning a worker. Reasoning escalation.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "question": { "type": "string" }, "model": { "type": "string" } },
@@ -120,7 +120,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "open_pr",
-            description: "Abre um PR a partir de uma branch (nunca faz merge). Fallback: patch local.",
+            description: "Open a PR from a branch (never merges). Fallback: a local patch.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -307,7 +307,7 @@ mod tests {
 
     fn run(dir: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
-        assert!(status.success(), "git {:?} falhou", args);
+        assert!(status.success(), "git {:?} failed", args);
     }
 
     fn roundtrip(messages: &[Value], session: Session) -> Vec<Value> {

@@ -226,7 +226,7 @@ impl App {
             repo: repo.to_string(),
             chat: vec![ChatMsg {
                 role: ChatRole::Info,
-                text: "Rege pronto. Digite uma tarefa. /help lista comandos, /quit sai.".into(),
+                text: "rege ready. Type a task. /help lists the commands, /quit leaves.".into(),
             }],
             input: String::new(),
             input_cursor: 0,
@@ -314,7 +314,7 @@ impl App {
             let name = theme::names()[cursor].to_string();
             self.theme = name.clone();
             if let Err(e) = save_theme_to_config(&name) {
-                self.push(ChatRole::Error, format!("erro ao salvar tema: {e}"));
+                self.push(ChatRole::Error, format!("could not save the theme: {e}"));
             }
             self.mode = Mode::Normal;
         }
@@ -344,7 +344,7 @@ impl App {
             if let Some(rec) = self.resume_list.get(cursor) {
                 let (id, title) = (rec.id.clone(), rec.title.clone());
                 self.session_id = Some(id.clone());
-                self.push(ChatRole::Info, format!("retomando sessão: {title}"));
+                self.push(ChatRole::Info, format!("resuming session: {title}"));
                 self.replay_transcript(&id);
             }
             self.mode = Mode::Normal;
@@ -367,7 +367,7 @@ impl App {
             let role = if turn.from_user { ChatRole::User } else { ChatRole::Assistant };
             self.push(role, turn.text.clone());
         }
-        self.push(ChatRole::Info, format!("— fim do histórico ({} mensagens) · continue daqui —", turns.len()));
+        self.push(ChatRole::Info, format!("— end of history ({} messages) · carry on from here —", turns.len()));
     }
 
     fn resume_picker_cancel(&mut self) {
@@ -452,7 +452,7 @@ impl App {
                 let cli = cli.clone();
                 self.roster.push(RosterEntry { role: "worker".into(), cli: cli.clone(), model: None });
                 self.persist_roster();
-                self.push(ChatRole::Info, format!("agente conectado: {cli} (worker)"));
+                self.push(ChatRole::Info, format!("agent connected: {cli} (worker)"));
             }
             AgentsRow::AddManual => {
                 self.mode = Mode::AgentsAdd { input: String::new() };
@@ -470,7 +470,7 @@ impl App {
             if i < self.roster.len() {
                 let removed = self.roster.remove(i);
                 self.persist_roster();
-                self.push(ChatRole::Info, format!("agente removido: {} ({})", removed.cli, removed.role));
+                self.push(ChatRole::Info, format!("agent removed: {} ({})", removed.cli, removed.role));
                 // Clamp the cursor: the row count just shrank.
                 let n = self.agents_selectable().len();
                 let next = cursor.min(n.saturating_sub(1));
@@ -491,7 +491,7 @@ impl App {
         let model = parts.next().map(str::to_string);
         match cli {
             None => {
-                self.push(ChatRole::Error, "uso: cli [role] [model] — ex: codex worker o3");
+                self.push(ChatRole::Error, "usage: cli [role] [model] — e.g. codex worker o3");
             }
             Some(cli) if !command::KNOWN_CLIS.contains(&cli.as_str()) => {
                 self.push(
@@ -503,7 +503,7 @@ impl App {
                 self.roster.push(RosterEntry { role: role.clone(), cli: cli.clone(), model: model.clone() });
                 self.persist_roster();
                 let m = model.as_deref().unwrap_or("(default)");
-                self.push(ChatRole::Info, format!("agente adicionado: {cli} · {role} · {m}"));
+                self.push(ChatRole::Info, format!("agent added: {cli} · {role} · {m}"));
             }
         }
         self.open_agents_picker();
@@ -511,7 +511,7 @@ impl App {
 
     fn persist_roster(&mut self) {
         if let Err(e) = save_roster_to_config(&self.roster) {
-            self.push(ChatRole::Error, format!("erro ao salvar roster: {e}"));
+            self.push(ChatRole::Error, format!("could not save the roster: {e}"));
         }
     }
 
@@ -781,7 +781,7 @@ impl App {
         }
         if line.starts_with('/') {
             let cmd = line.split_whitespace().next().unwrap_or(&line).to_string();
-            self.push(ChatRole::Error, format!("comando desconhecido: {cmd}"));
+            self.push(ChatRole::Error, format!("unknown command: {cmd}"));
             return;
         }
         if self.pending_title.is_none() {
@@ -851,7 +851,7 @@ impl App {
         }
         self.master = format!("{}/{}", self.master_cli, name);
         self.master_model = Some(name.clone());
-        self.push(ChatRole::Info, format!("modelo do mestre: {name}"));
+        self.push(ChatRole::Info, format!("master model: {name}"));
     }
 
     fn scan_offer_move(&mut self, delta: isize) {
@@ -865,14 +865,14 @@ impl App {
     fn answer_scan_offer(&mut self, yes: bool) {
         self.mode = Mode::Normal;
         let dir = PathBuf::from(&self.repo);
-        self.push(ChatRole::Info, format!("primeira vez aqui ({}).", self.repo));
+        self.push(ChatRole::Info, format!("first time here ({}).", self.repo));
         if let Err(e) = scan::record(&self.scanned_path, &dir, if yes { "yes" } else { "no" }) {
-            self.push(ChatRole::Error, format!("não consegui gravar a resposta: {e}"));
+            self.push(ChatRole::Error, format!("could not record the answer: {e}"));
         }
         if yes {
             self.start_scan(false);
         } else {
-            self.push(ChatRole::Info, "ok, não pergunto de novo aqui. `/scan` roda quando quiser.");
+            self.push(ChatRole::Info, "ok, I won't ask here again. `/scan` runs whenever you want.");
         }
     }
 
@@ -880,12 +880,12 @@ impl App {
     /// freeze for it. The result lands via `scan_rx` on a later tick.
     fn start_scan(&mut self, force: bool) {
         if self.scan_rx.is_some() {
-            self.push(ChatRole::Info, "já tem um scan rodando.");
+            self.push(ChatRole::Info, "a scan is already running.");
             return;
         }
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
-        self.push(ChatRole::Info, "escaneando o diretório… (uma chamada ao mestre)");
+        self.push(ChatRole::Info, "scanning the directory… (one call to the master)");
         let dir = PathBuf::from(&self.repo);
         let cfg = self.scan_config();
         let home = crate::dirs_home();
@@ -916,7 +916,7 @@ impl App {
                 self.scan_rx = None;
             }
             Ok(Err(e)) => {
-                self.push(ChatRole::Error, format!("scan falhou: {e}"));
+                self.push(ChatRole::Error, format!("scan failed: {e}"));
                 self.scan_rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -954,7 +954,7 @@ impl App {
         match event {
             stream::Event::Ready { session_id } => {
                 if !self.session_recorded {
-                    let title = self.pending_title.clone().unwrap_or_else(|| "(sem título)".to_string());
+                    let title = self.pending_title.clone().unwrap_or_else(|| "(untitled)".to_string());
                     sessions::add(
                         &self.sessions_path,
                         SessionRec { id: session_id.clone(), title, repo: self.repo.clone(), ts: sessions::now_ts() },
@@ -991,21 +991,21 @@ impl App {
                 Some(name) => {
                     self.master_model = Some(name.to_string());
                     self.master = format!("{}/{}", self.master_cli, name);
-                    self.push(ChatRole::Info, format!("modelo do mestre: {name}"));
+                    self.push(ChatRole::Info, format!("master model: {name}"));
                 }
             },
             "/config" => {
                 let cur = self.master_model.clone().unwrap_or_else(|| "(default)".into());
                 let lines = vec![
-                    format!("mestre       {} / {cur}", self.master_cli),
-                    format!("tema         {}", self.theme),
+                    format!("master       {} / {cur}", self.master_cli),
+                    format!("theme        {}", self.theme),
                     format!("auto_copy    {}", self.auto_copy),
                     format!("repo         {}", self.repo),
-                    format!("sessões      {}", self.sessions_path.display()),
+                    format!("sessions     {}", self.sessions_path.display()),
                     String::new(),
-                    "edite ~/.config/rege/config.yml ou .rege.yml no projeto".to_string(),
+                    "edit ~/.config/rege/config.yml or the project's .rege.yml".to_string(),
                 ];
-                self.mode = Mode::InfoPanel { title: " config efetiva ".to_string(), lines };
+                self.mode = Mode::InfoPanel { title: " effective config ".to_string(), lines };
             }
             "/theme" => match parts.next() {
                 None => self.open_theme_picker(),
@@ -1013,20 +1013,20 @@ impl App {
                     self.theme = name.to_string();
                 }
                 Some(name) => {
-                    self.push(ChatRole::Error, format!("tema inexistente: {name}"));
+                    self.push(ChatRole::Error, format!("no such theme: {name}"));
                 }
             },
             "/resume" => self.open_resume_picker(),
             "/agents" => match parts.next() {
                 // `/agents ativos` keeps the old inline list of running workers;
                 // bare `/agents` opens the roster overlay.
-                Some("ativos") | Some("running") => {
+                Some("active") | Some("ativos") | Some("running") => {
                     let lines = if self.agents.is_empty() {
-                        vec!["nenhum agente ativo".to_string()]
+                        vec!["no active agents".to_string()]
                     } else {
                         self.agents.iter().map(|a| format!("{:<14} {}", a.name, a.state.label())).collect()
                     };
-                    self.mode = Mode::InfoPanel { title: " agentes ativos ".to_string(), lines };
+                    self.mode = Mode::InfoPanel { title: " active agents ".to_string(), lines };
                 }
                 _ => self.open_agents_picker(),
             },
@@ -1040,15 +1040,15 @@ impl App {
                         let reaction = buddy.pet();
                         self.push(ChatRole::Assistant, reaction);
                     } else {
-                        self.push(ChatRole::Info, "/buddy primeiro");
+                        self.push(ChatRole::Info, "/buddy first");
                     }
                 }
                 Some(other) => {
-                    self.push(ChatRole::Error, format!("subcomando desconhecido: {other}"));
+                    self.push(ChatRole::Error, format!("unknown subcommand: {other}"));
                 }
             },
             other => {
-                self.push(ChatRole::Error, format!("comando desconhecido: {other}"));
+                self.push(ChatRole::Error, format!("unknown command: {other}"));
             }
         }
     }
@@ -1073,108 +1073,109 @@ struct CommandDoc {
 const COMMAND_CATALOG: &[CommandDoc] = &[
     CommandDoc {
         cmd: "/help",
-        hint: "lista os comandos",
+        hint: "list the commands",
         body: &[
-            "Esta tela. ↑↓ percorre os comandos e explica cada um aqui embaixo; \
-             Enter executa o que estiver destacado.",
-            "Se você é novo no rege: você conversa com o MESTRE. Ele não escreve \
-             código — ele avalia a tarefa e delega pra workers, cada um num git \
-             worktree isolado. Depois revisa e abre um PR.",
-            "O mestre nunca faz merge. A saída final é sempre um PR pra você aprovar.",
+            "This screen. ↑↓ walks the commands and explains each one down here; \
+             Enter runs whatever is highlighted.",
+            "New to rege? You talk to the MASTER. It doesn't write code — it sizes \
+             the task up and delegates to workers, each in its own isolated git \
+             worktree. Then it reviews the work and opens a PR.",
+            "The master never merges. The final output is always a PR for you to approve.",
         ],
-        examples: &["/help", "/? (mesma coisa)"],
+        examples: &["/help", "/? (same thing)"],
     },
     CommandDoc {
         cmd: "/theme",
-        hint: "seletor de tema (preview ao vivo)",
+        hint: "theme picker (live preview)",
         body: &[
-            "Troca a paleta de cores da interface. Sem argumento abre o seletor, \
-             onde o cursor dá preview ao vivo: a tela inteira muda enquanto você \
-             navega, então dá pra escolher olhando em vez de adivinhar pelo nome.",
-            "Com o nome direto, aplica sem abrir nada.",
+            "Changes the interface palette. With no argument it opens the picker, \
+             where the cursor previews live: the whole screen changes as you move, \
+             so you can choose by looking instead of guessing from the name.",
+            "Given a name directly, it applies without opening anything.",
         ],
         examples: &["/theme", "/theme luxury"],
     },
     CommandDoc {
         cmd: "/model",
-        hint: "troca o modelo do mestre",
+        hint: "switch the master's model",
         body: &[
-            "Troca o modelo que o MESTRE usa — não o dos workers, que vêm do roster \
-             em /agents.",
-            "Vale escalar aqui quando a tarefa é de decisão difícil (arquitetura, \
-             triagem de algo ambíguo) e economizar quando é rotina. Modelo caro no \
-             mestre com workers baratos é a combinação usual.",
+            "Switches the model the MASTER runs on — not the workers', which come \
+             from the roster in /agents.",
+            "Worth scaling up here when the task is a hard call (architecture, \
+             triaging something ambiguous) and down when it's routine. An expensive \
+             master with cheap workers is the usual pairing.",
         ],
         examples: &["/model", "/model opus", "/model sonnet"],
     },
     CommandDoc {
         cmd: "/config",
-        hint: "mostra a config efetiva",
+        hint: "show the effective config",
         body: &[
-            "Mostra o que está valendo AGORA, já resolvido: mestre, tema, auto_copy, \
-             repo e onde as sessões são gravadas.",
-            "É a config efetiva, depois de juntar as camadas — ~/.config/rege/config.yml \
-             e o .rege.yml do projeto, que tem a última palavra. Se algo não parece \
-             estar pegando, olhe aqui antes de editar arquivo.",
+            "Shows what is in force RIGHT NOW, already resolved: master, theme, \
+             auto_copy, repo, and where sessions are recorded.",
+            "This is the effective config, after the layers are merged — \
+             ~/.config/rege/config.yml and the project's .rege.yml, which has the \
+             last word. If something doesn't seem to be taking effect, look here \
+             before editing a file.",
         ],
         examples: &["/config"],
     },
     CommandDoc {
         cmd: "/resume",
-        hint: "retoma sessão anterior",
+        hint: "resume an earlier session",
         body: &[
-            "Lista as conversas anteriores deste repo e retoma a escolhida, com o \
-             contexto de onde você parou.",
-            "Útil quando o trabalho atravessa dias: em vez de reexplicar a tarefa, \
-             você continua de onde estava.",
+            "Lists this repo's earlier conversations and resumes the one you pick, \
+             with the context of where you left off.",
+            "Useful when work spans days: instead of re-explaining the task, you \
+             carry on from where you were.",
         ],
         examples: &["/resume"],
     },
     CommandDoc {
         cmd: "/agents",
-        hint: "roster de agentes (conecta/remove)",
+        hint: "agent roster (connect/remove)",
         body: &[
-            "Seu roster: quais CLIs de IA o mestre pode usar como workers, e em que \
-             papel. Enter conecta um CLI que está instalado mas fora do roster; \
-             x remove; a adiciona um à mão.",
-            "É daqui que os workers saem. Quando o mestre delega, ele escolhe entre \
-             estes — cada um roda isolado num git worktree, em sessão tmux própria, \
-             sem tocar na sua branch.",
-            "Grava em ~/.config/rege/config.yml. `/agents ativos` mostra quem está \
-             rodando agora.",
+            "Your roster: which AI CLIs the master may use as workers, and in what \
+             role. Enter connects a CLI that is installed but outside the roster; \
+             x removes one; a adds one by hand.",
+            "This is where workers come from. When the master delegates, it picks \
+             among these — each runs isolated in a git worktree, in its own tmux \
+             session, without touching your branch.",
+            "Saved to ~/.config/rege/config.yml. `/agents active` shows who is \
+             running right now.",
         ],
-        examples: &["/agents", "/agents ativos"],
+        examples: &["/agents", "/agents active"],
     },
     CommandDoc {
         cmd: "/scan",
-        hint: "escaneia o diretório e escreve o AGENTS.md",
+        hint: "scan the directory and write AGENTS.md",
         body: &[
-            "Olha o diretório e escreve um AGENTS.md descrevendo ele: o que é, como \
-             rodar e testar, estrutura, convenções.",
-            "AGENTS.md é a convenção que claude, codex e afins leem sozinhos — então \
-             o arquivo ajuda qualquer agente que trabalhe aqui, não só o rege.",
-            "Nunca sobrescreve um AGENTS.md existente sem --force. É oferecido uma \
-             vez por diretório na primeira vez que você abre o rege nele.",
+            "Looks at the directory and writes an AGENTS.md describing it: what it \
+             is, how to run and test it, structure, conventions.",
+            "AGENTS.md is the convention claude, codex and friends read on their \
+             own — so the file helps any agent working here, not just rege.",
+            "Never overwrites an existing AGENTS.md without --force. It is offered \
+             once per directory, the first time you open rege in it.",
         ],
         examples: &["/scan", "/scan --force"],
     },
     CommandDoc {
         cmd: "/buddy",
-        hint: "bicho de estimação animado",
+        hint: "animated pet",
         body: &[
-            "Choca um bichinho no canto da tela, com aparência derivada do seu \
-             usuário — o mesmo usuário sempre choca o mesmo bicho.",
-            "Não faz nada de útil. `/buddy pet` faz carinho.",
+            "Hatches a critter in the corner of the screen, its looks derived from \
+             your username — the same user always hatches the same creature.",
+            "It does nothing useful. `/buddy pet` gives it a scratch.",
         ],
         examples: &["/buddy", "/buddy pet"],
     },
     CommandDoc {
         cmd: "/quit",
-        hint: "sai do rege",
+        hint: "leave rege",
         body: &[
-            "Fecha a TUI. A sessão fica gravada, então /resume traz ela de volta.",
-            "Workers já disparados seguem nas sessões tmux deles — sair da TUI não \
-             mata o trabalho em andamento.",
+            "Closes the TUI. The session is recorded, so /resume brings it back.",
+            "Workers already dispatched carry on in their own tmux sessions — \
+             leaving the TUI doesn't kill work in flight.",
         ],
         examples: &["/quit", "/q · exit · :q"],
     },
@@ -1461,12 +1462,12 @@ pub fn render_frame(config: &Config, repo: &str, cols: u16, rows: u16, demo: boo
     use ratatui::backend::TestBackend;
     let mut app = App::new(config, repo);
     if demo {
-        app.push(ChatRole::User, "refatora o modulo de auth e adiciona testes");
-        app.push(ChatRole::Assistant, "Tarefa difícil. Rodando 3 workers na mesma tarefa.");
-        app.push(ChatRole::Info, "⚙ spawn_agent · claude/sonnet · refatora auth");
+        app.push(ChatRole::User, "refactor the auth module and add tests");
+        app.push(ChatRole::Assistant, "Hard task. Running 3 workers on the same task.");
+        app.push(ChatRole::Info, "⚙ spawn_agent · claude/sonnet · refactor auth");
         app.agents = vec![
-            AgentRow { name: "a1".into(), state: AgentState::Running, last: "editando session.rs…".into() },
-            AgentRow { name: "a2".into(), state: AgentState::Done, last: "patch pronto".into() },
+            AgentRow { name: "a1".into(), state: AgentState::Running, last: "editing session.rs…".into() },
+            AgentRow { name: "a2".into(), state: AgentState::Done, last: "patch ready".into() },
         ];
     }
     let backend = TestBackend::new(cols, rows);
@@ -1956,7 +1957,7 @@ fn render_messages(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, the
     // looks stuck — nothing on screen says the newest message is off-view.
     if back > 0 {
         if let Some(last) = visible.last_mut() {
-            *last = Line::from(styled(theme, Role::Accent, format!("↓ mais {back} linhas · fim ao rolar")));
+            *last = Line::from(styled(theme, Role::Accent, format!("↓ {back} more lines · end when you scroll")));
         }
     }
     Paragraph::new(visible).render(area, buf);
@@ -2184,12 +2185,12 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
-    let block = rounded_block(theme, " agentes ", Role::Dim);
+    let block = rounded_block(theme, " agents ", Role::Dim);
     let inner = block.inner(area);
     block.render(area, buf);
 
     let lines: Vec<Line> = if app.agents.is_empty() {
-        vec![Line::from(styled(theme, Role::Dim, "nenhum agente ativo"))]
+        vec![Line::from(styled(theme, Role::Dim, "no active agents"))]
     } else {
         app.agents
             .iter()
@@ -2365,9 +2366,9 @@ fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, them
     let ready = app.agents.iter().filter(|a| a.state == AgentState::Done).count();
     let line = Line::from(vec![
         styled(theme, Role::Accent, running.to_string()),
-        styled(theme, Role::Dim, " rodando · "),
+        styled(theme, Role::Dim, " running · "),
         styled(theme, Role::Accent, ready.to_string()),
-        styled(theme, Role::Dim, " pronto · /help · /theme · /model · /resume · /quit"),
+        styled(theme, Role::Dim, " ready · /help · /theme · /model · /resume · /quit"),
     ]);
     Paragraph::new(line).render(area, buf);
 }
@@ -2394,13 +2395,13 @@ fn draw_theme_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, c
     // cells underneath intact, which let the banner and panels show through.
     Clear.render(rect, buf);
 
-    let block = rounded_block(theme, " tema ", Role::Dim);
+    let block = rounded_block(theme, " theme ", Role::Dim);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(styled(theme, Role::Text, "Escolha o tema").add_modifier(Modifier::BOLD)));
-    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter seleciona · Esc cancela")));
+    lines.push(Line::from(styled(theme, Role::Text, "Pick a theme").add_modifier(Modifier::BOLD)));
+    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ move · Enter selects · Esc cancels")));
 
     for (i, name) in names.iter().enumerate() {
         let chevron = if i == cursor { styled(theme, Role::Accent, "❯ ") } else { styled(theme, Role::Dim, "  ") };
@@ -2437,22 +2438,22 @@ fn draw_resume_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
     // cells underneath intact, which let the banner and panels show through.
     Clear.render(rect, buf);
 
-    let block = rounded_block(theme, " sessoes ", Role::Dim);
+    let block = rounded_block(theme, " sessions ", Role::Dim);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(styled(theme, Role::Text, "Retomar sessão").add_modifier(Modifier::BOLD)));
-    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter retoma · Esc cancela")));
+    lines.push(Line::from(styled(theme, Role::Text, "Resume a session").add_modifier(Modifier::BOLD)));
+    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ move · Enter resumes · Esc cancels")));
 
     if app.resume_list.is_empty() {
-        lines.push(Line::from(styled(theme, Role::Dim, "nenhuma sessão anterior")));
+        lines.push(Line::from(styled(theme, Role::Dim, "no earlier sessions")));
     } else {
         let now = sessions::now_ts();
         for (i, rec) in app.resume_list.iter().enumerate() {
             let chevron = if i == cursor { styled(theme, Role::Accent, "❯ ") } else { styled(theme, Role::Dim, "  ") };
             let short_id: String = rec.id.chars().take(8).collect();
-            let text = format!("{}  ·  {}  ·  há {}", rec.title, short_id, rel_time(rec.ts, now));
+            let text = format!("{}  ·  {}  ·  {} ago", rec.title, short_id, rel_time(rec.ts, now));
             let span = if i == cursor {
                 styled(theme, Role::Accent, text).add_modifier(Modifier::BOLD)
             } else {
@@ -2477,13 +2478,13 @@ fn draw_agents_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
     // cells underneath intact, which let the banner and panels show through.
     Clear.render(rect, buf);
 
-    let block = rounded_block(theme, " agentes ", Role::Dim);
+    let block = rounded_block(theme, " agents ", Role::Dim);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(styled(theme, Role::Text, "Roster de agentes").add_modifier(Modifier::BOLD)));
-    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter conecta · a adiciona · x remove · Esc fecha")));
+    lines.push(Line::from(styled(theme, Role::Text, "Agent roster").add_modifier(Modifier::BOLD)));
+    lines.push(Line::from(styled(theme, Role::Dim, "↑↓ move · Enter connects · a adds · x removes · Esc closes")));
 
     // Walk the same rows the cursor walks, tracking the selectable index so the
     // highlighted line matches the cursor exactly.
@@ -2501,12 +2502,12 @@ fn draw_agents_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, 
                 sel += 1;
             }
             AgentsRow::Connect(cli) => {
-                let text = format!("conectar {cli} (instalado)");
+                let text = format!("connect {cli} (installed)");
                 lines.push(agents_line(theme, sel == cursor, &text));
                 sel += 1;
             }
             AgentsRow::AddManual => {
-                lines.push(agents_line(theme, sel == cursor, "+ adicionar manual"));
+                lines.push(agents_line(theme, sel == cursor, "+ add by hand"));
                 sel += 1;
             }
         }
@@ -2538,8 +2539,8 @@ fn draw_help_picker(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cu
         Layout::vertical([Constraint::Length(list_height), Constraint::Min(1)]).areas(inner);
 
     let mut lines = vec![
-        Line::from(styled(theme, Role::Text, "Comandos").add_modifier(Modifier::BOLD)),
-        Line::from(styled(theme, Role::Dim, "↑↓ explica · Enter executa · Esc fecha")),
+        Line::from(styled(theme, Role::Text, "Commands").add_modifier(Modifier::BOLD)),
+        Line::from(styled(theme, Role::Dim, "↑↓ explains · Enter runs · Esc closes")),
     ];
     for (i, doc) in COMMAND_CATALOG.iter().enumerate() {
         lines.push(agents_line(theme, i == cursor, &format!("{:<10} {}", doc.cmd, doc.hint)));
@@ -2590,14 +2591,14 @@ fn draw_model_input(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
     let rect = centered_rect(60, 9, area);
     Clear.render(rect, buf);
 
-    let block = rounded_block(theme, " modelo do mestre ", Role::Accent);
+    let block = rounded_block(theme, " master model ", Role::Accent);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
     let cur = app.master_model.clone().unwrap_or_else(|| "(default do CLI)".into());
     let lines = vec![
         Line::from(styled(theme, Role::Text, format!("CLI: {}", app.master_cli)).add_modifier(Modifier::BOLD)),
-        Line::from(styled(theme, Role::Dim, format!("modelo atual: {cur}"))),
+        Line::from(styled(theme, Role::Dim, format!("current model: {cur}"))),
         Line::from(""),
         Line::from(vec![styled(theme, Role::Accent, "❯ "), styled(theme, Role::Text, input.to_string())]),
         Line::from(""),
@@ -2619,7 +2620,7 @@ fn draw_info_panel(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, tit
 
     let mut lines: Vec<Line> = body.iter().map(|l| Line::from(styled(theme, Role::Text, l.clone()))).collect();
     lines.push(Line::from(""));
-    lines.push(Line::from(styled(theme, Role::Dim, "qualquer tecla fecha")));
+    lines.push(Line::from(styled(theme, Role::Dim, "any key closes")));
     Paragraph::new(lines).render(inner, buf);
 }
 
@@ -2635,21 +2636,21 @@ fn draw_scan_offer(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cur
     // cells underneath intact, which let the banner and panels show through.
     Clear.render(rect, buf);
 
-    let block = rounded_block(theme, " primeira vez aqui ", Role::Accent);
+    let block = rounded_block(theme, " first time here ", Role::Accent);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
     let lines = vec![
         Line::from(
-            styled(theme, Role::Text, format!("Escaneio {}?", repo_name(app))).add_modifier(Modifier::BOLD),
+            styled(theme, Role::Text, format!("Scan {}?", repo_name(app))).add_modifier(Modifier::BOLD),
         ),
         Line::from(styled(theme, Role::Dim, app.repo.clone())),
-        Line::from(styled(theme, Role::Dim, format!("escrevo um {} descrevendo o diretório.", scan::CONTEXT_FILE))),
+        Line::from(styled(theme, Role::Dim, format!("I write an {} describing the directory.", scan::CONTEXT_FILE))),
         Line::from(""),
-        agents_line(theme, cursor == 0, "sim, escanear"),
-        agents_line(theme, cursor == 1, "não, e não perguntar de novo aqui"),
+        agents_line(theme, cursor == 0, "yes, scan it"),
+        agents_line(theme, cursor == 1, "no, and don't ask here again"),
         Line::from(""),
-        Line::from(styled(theme, Role::Dim, "↑↓ navega · Enter confirma · s/n responde direto")),
+        Line::from(styled(theme, Role::Dim, "↑↓ move · Enter confirms · y/n answers directly")),
     ];
     Paragraph::new(lines).render(inner, buf);
 }
@@ -2675,12 +2676,12 @@ fn draw_agents_add(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
     };
     let rect = centered_rect(60, 7, area);
     Clear.render(rect, buf); // real clear: an empty Paragraph leaves cells intact
-    let block = rounded_block(theme, " novo agente ", Role::Dim);
+    let block = rounded_block(theme, " new agent ", Role::Dim);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
     let lines = vec![
-        Line::from(styled(theme, Role::Text, "Adicionar agente").add_modifier(Modifier::BOLD)),
+        Line::from(styled(theme, Role::Text, "Add an agent").add_modifier(Modifier::BOLD)),
         Line::from(styled(theme, Role::Dim, "formato: cli [role] [model] · Enter grava · Esc volta")),
         Line::from(vec![
             styled(theme, Role::Accent, "❯ "),
@@ -2707,7 +2708,7 @@ fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: R
     let rect = Rect { x: input_rect.x, y, width, height };
 
     Clear.render(rect, buf); // real clear: an empty Paragraph leaves cells intact
-    let block = rounded_block(theme, " comandos ", Role::Dim);
+    let block = rounded_block(theme, " commands ", Role::Dim);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
@@ -2801,21 +2802,21 @@ mod tests {
         assert_eq!(tool_result_label("ok\nmais coisa\n"), "ok…");
         assert_eq!(tool_result_label(""), "ok");
         let flood = "x".repeat(200);
-        assert!(tool_result_label(&flood).chars().count() <= 61, "resultado nunca inunda o log");
+        assert!(tool_result_label(&flood).chars().count() <= 61, "a result never floods the log");
     }
 
     #[test]
     fn fenced_block_loses_the_backticks_and_keeps_the_code() {
-        let text = "instala assim:\n```bash\ncargo install --path .\n```\npronto";
+        let text = "install it like this:\n```bash\ncargo install --path .\n```\ndone";
         let segs = fenced_segments(text, 80);
-        assert!(!segs.iter().any(|(s, _)| s.contains("```")), "cerca não aparece: {segs:?}");
-        assert!(!segs.iter().any(|(s, _)| s.trim() == "bash"), "a linguagem da cerca não vira linha");
+        assert!(!segs.iter().any(|(s, _)| s.contains("```")), "the fence must not show: {segs:?}");
+        assert!(!segs.iter().any(|(s, _)| s.trim() == "bash"), "the fence language must not become a row");
         assert_eq!(
             segs.iter().find(|(s, _)| s.contains("cargo")).map(|(_, code)| *code),
             Some(true),
-            "o corpo da cerca vem marcado como código"
+            "the fence body comes marked as code"
         );
-        assert_eq!(segs.iter().find(|(s, _)| s.contains("pronto")).map(|(_, code)| *code), Some(false));
+        assert_eq!(segs.iter().find(|(s, _)| s.contains("done")).map(|(_, code)| *code), Some(false));
     }
 
     #[test]
@@ -2866,7 +2867,7 @@ mod tests {
         let mut app = App::new(&config, "/tmp/repo");
         app.dispatch("/theme nope");
         assert_eq!(app.theme, "hacker");
-        assert!(app.chat.iter().any(|m| m.text.contains("tema inexistente")));
+        assert!(app.chat.iter().any(|m| m.text.contains("no such theme")));
     }
 
     #[test]
@@ -2874,10 +2875,10 @@ mod tests {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
         app.dispatch("/help");
-        assert!(matches!(app.mode, Mode::HelpPicker { .. }), "/help abre overlay, não despeja no log");
+        assert!(matches!(app.mode, Mode::HelpPicker { .. }), "/help opens an overlay, it does not dump into the log");
         let painted = render_to_lines(&mut app, 90, 30);
         for cmd in ["/model", "/config", "/resume"] {
-            assert!(painted.iter().any(|l| l.contains(cmd)), "{cmd} devia estar no painel");
+            assert!(painted.iter().any(|l| l.contains(cmd)), "{cmd} should be in the panel");
         }
 
         // The highlighted command gets explained, not just labeled — /help has
@@ -2885,15 +2886,15 @@ mod tests {
         let agents_idx = COMMAND_CATALOG.iter().position(|d| d.cmd == "/agents").unwrap();
         app.mode = Mode::HelpPicker { cursor: agents_idx };
         let doc = render_to_lines(&mut app, 90, 34).join(" ");
-        assert!(doc.contains("worktree"), "explicação do /agents devia situar o worker: {doc}");
-        assert!(doc.contains("ex:"), "exemplos de uso no painel");
+        assert!(doc.contains("worktree"), "the /agents explanation should place the worker: {doc}");
+        assert!(doc.contains("ex:"), "usage examples in the panel");
 
         // Every command carries real documentation, so no entry can rot into a
         // bare label as the catalog grows.
         for d in COMMAND_CATALOG {
-            assert!(!d.body.is_empty(), "{} sem explicação", d.cmd);
+            assert!(!d.body.is_empty(), "{} has no explanation", d.cmd);
             assert!(!d.examples.is_empty(), "{} sem exemplo", d.cmd);
-            assert!(d.body[0].len() > 40, "{}: explicação curta demais pra ensinar algo", d.cmd);
+            assert!(d.body[0].len() > 40, "{}: explanation too short to teach anything", d.cmd);
         }
 
         // Enter runs what's highlighted — walk to /theme and confirm it opens.
@@ -2903,7 +2904,7 @@ mod tests {
             app.help_picker_move(1);
         }
         app.help_picker_confirm();
-        assert!(matches!(app.mode, Mode::ThemePicker { .. }), "Enter devia executar o comando destacado");
+        assert!(matches!(app.mode, Mode::ThemePicker { .. }), "Enter should run the highlighted command");
     }
 
     #[test]
@@ -2922,9 +2923,9 @@ mod tests {
         let before = app.master_model.clone();
         app.dispatch("/model");
         assert!(matches!(app.mode, Mode::ModelInput { .. }));
-        assert_eq!(app.master_model, before, "abrir o painel não muda nada");
+        assert_eq!(app.master_model, before, "opening the panel changes nothing");
         let painted = render_to_lines(&mut app, 90, 30);
-        assert!(painted.iter().any(|l| l.contains("modelo atual")), "painel mostra o modelo em uso");
+        assert!(painted.iter().any(|l| l.contains("current model")), "the panel shows the model in use");
 
         app.mode = Mode::ModelInput { input: " opus ".to_string() };
         app.model_input_confirm();
@@ -2946,18 +2947,18 @@ mod tests {
         assert!(matches!(app.mode, Mode::InfoPanel { .. }));
         let painted = render_to_lines(&mut app, 100, 30);
         assert!(painted.iter().any(|l| l.contains("auto_copy")));
-        assert!(painted.iter().any(|l| l.contains("tema")));
-        assert!(painted.iter().any(|l| l.contains("config efetiva")), "título no painel");
+        assert!(painted.iter().any(|l| l.contains("theme")));
+        assert!(painted.iter().any(|l| l.contains("effective config")), "panel title");
     }
 
     #[test]
     fn agents_ativos_also_gets_a_panel() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
-        app.dispatch("/agents ativos");
+        app.dispatch("/agents active");
         let painted = render_to_lines(&mut app, 100, 30);
-        assert!(painted.iter().any(|l| l.contains("nenhum agente ativo")));
-        assert!(painted.iter().any(|l| l.contains("agentes ativos")), "título no painel");
+        assert!(painted.iter().any(|l| l.contains("no active agents")));
+        assert!(painted.iter().any(|l| l.contains("active agents")), "panel title");
     }
 
     #[test]
@@ -2965,7 +2966,7 @@ mod tests {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
         app.dispatch("/naoexiste");
-        assert!(app.chat.iter().any(|m| m.text.contains("comando desconhecido")));
+        assert!(app.chat.iter().any(|m| m.text.contains("unknown command")));
     }
 
     #[test]
@@ -2980,7 +2981,7 @@ mod tests {
     fn render_frame_demo_shows_agents_and_chat() {
         let config = Config::default();
         let out = render_frame(&config, "/tmp/portfolio", 100, 32, true);
-        assert!(out.contains("refatora o modulo de auth"));
+        assert!(out.contains("refactor the auth module"));
         assert!(out.contains("a1"));
         assert!(out.contains("running") || out.contains("done"));
     }
@@ -3005,7 +3006,7 @@ mod tests {
         for name in theme::names() {
             let (bg, fg) = selection_colors(name);
             let luma = |c: (u8, u8, u8)| (c.0 as i32 * 299 + c.1 as i32 * 587 + c.2 as i32 * 114) / 1000;
-            assert!((luma(bg) - luma(fg)).abs() > 90, "{name}: contraste fraco entre seleção e texto");
+            assert!((luma(bg) - luma(fg)).abs() > 90, "{name}: weak contrast between selection and text");
         }
     }
 
@@ -3313,7 +3314,7 @@ mod tests {
         let mut app = App::new(&config, "/tmp/repo");
         app.open_agents_picker();
         let painted = render_to_lines(&mut app, 80, 24);
-        let overlay: Vec<&String> = painted.iter().filter(|l| l.contains("Roster de agentes")).collect();
+        let overlay: Vec<&String> = painted.iter().filter(|l| l.contains("Agent roster")).collect();
         assert_eq!(overlay.len(), 1, "overlay devia aparecer uma vez: {painted:?}");
         // The wordmark is drawn behind the popup; none of it may survive on the
         // overlay's own rows.
@@ -3324,9 +3325,9 @@ mod tests {
         app2.scanned_path = d.join("s.yml");
         app2.offer_scan_if_first_run();
         let painted2 = render_to_lines(&mut app2, 80, 24);
-        let row = painted2.iter().find(|l| l.contains("sim, escanear")).expect("linha do overlay");
-        assert!(!row.contains("agentes"), "painel de agentes vazando: {row}");
-        assert!(!row.contains('─'), "borda de outro painel vazando: {row}");
+        let row = painted2.iter().find(|l| l.contains("yes, scan it")).expect("the overlay row");
+        assert!(!row.contains("agentes"), "agents panel bleeding through: {row}");
+        assert!(!row.contains('─'), "another panel border bleeding through: {row}");
     }
 
     #[test]
@@ -3335,15 +3336,15 @@ mod tests {
         let junta = |spans: Vec<Span<'static>>| -> String { spans.iter().map(|s| s.content.to_string()).collect() };
 
         let b = markdown_spans(t, "vem **forte** aqui", Role::Text);
-        assert_eq!(junta(b.clone()), "vem forte aqui", "as estrelas somem do texto");
+        assert_eq!(junta(b.clone()), "vem forte aqui", "the stars leave the text");
         assert!(b.iter().any(|s| s.content == "forte" && s.style.add_modifier.contains(Modifier::BOLD)));
 
         let c = markdown_spans(t, "roda `bin/dev` agora", Role::Text);
         assert_eq!(junta(c.clone()), "roda bin/dev agora");
-        assert!(c.iter().any(|s| s.content == "bin/dev"), "código vira span próprio");
+        assert!(c.iter().any(|s| s.content == "bin/dev"), "code becomes its own span");
 
         let h = markdown_spans(t, "### 4. Modelos", Role::Text);
-        assert_eq!(junta(h.clone()), "4. Modelos", "os # somem");
+        assert_eq!(junta(h.clone()), "4. Modelos", "the hashes go away");
         assert!(h[0].style.add_modifier.contains(Modifier::BOLD));
 
         // Unpaired marks stay literal rather than eating the rest of the line.
@@ -3353,12 +3354,12 @@ mod tests {
 
     #[test]
     fn wrap_breaks_on_spaces_instead_of_mid_word() {
-        let linhas = wrap_text("nesse momento a conversao melhora", 20);
+        let linhas = wrap_text("at this point the conversion improves", 20);
         assert!(linhas.iter().all(|l| l.len() <= 20));
         for l in &linhas {
             assert!(!l.ends_with(' '), "sem espaço sobrando na quebra: {l:?}");
         }
-        assert_eq!(linhas.join(" "), "nesse momento a conversao melhora", "nada se perde nem se duplica");
+        assert_eq!(linhas.join(" "), "at this point the conversion improves", "nada se perde nem se duplica");
 
         // A single word longer than the line has nowhere to break — still cut.
         let gigante = wrap_text("supercalifragilistico", 8);
@@ -3370,7 +3371,7 @@ mod tests {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
         app.push(ChatRole::User, "sobe o servidor");
-        app.push(ChatRole::Assistant, "rodando em localhost:3000");
+        app.push(ChatRole::Assistant, "running on localhost:3000");
         let area = Rect::new(0, 0, 60, 20);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         draw(area, &mut buf, &mut app);
@@ -3386,11 +3387,11 @@ mod tests {
             })
         };
         let (bg, _) = user_row_colors(theme::DEFAULT);
-        let user = fundo_da_linha("sobe o servidor").expect("linha do usuário");
-        let assistant = fundo_da_linha("rodando em localhost").expect("linha do mestre");
+        let user = fundo_da_linha("sobe o servidor").expect("the user row");
+        let assistant = fundo_da_linha("running on localhost").expect("the master row");
 
-        assert!(user.iter().filter(|c| **c == rgb(bg)).count() > 40, "faixa preenchida na fala do usuário");
-        assert!(!assistant.iter().any(|c| *c == rgb(bg)), "a fala do mestre não leva faixa");
+        assert!(user.iter().filter(|c| **c == rgb(bg)).count() > 40, "filled band on the user speech");
+        assert!(!assistant.iter().any(|c| *c == rgb(bg)), "the master speech takes no band");
     }
 
     #[test]
@@ -3415,9 +3416,9 @@ mod tests {
         app.turn_started = Some(Instant::now());
         app.turn_chars = 34_000;
         let rodando = barra(&mut app);
-        assert!(rodando.contains("8.5k tokens"), "estimativa de tokens: {rodando}");
+        assert!(rodando.contains("8.5k tokens"), "token estimate: {rodando}");
         assert!(rodando.contains("0s"), "tempo decorrido");
-        assert!(ACTIVITY_WORDS.iter().any(|w| rodando.contains(w)), "palavra de atividade: {rodando}");
+        assert!(ACTIVITY_WORDS.iter().any(|w| rodando.contains(w)), "activity word: {rodando}");
         assert!(!rodando.contains("/help"), "a barra normal dá lugar à de atividade");
     }
 
@@ -3445,14 +3446,14 @@ mod tests {
     fn turn_tracking_starts_and_stops_with_the_stream() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
-        assert!(app.turn_started.is_none(), "parado ao abrir");
+        assert!(app.turn_started.is_none(), "idle on open");
 
         app.turn_started = Some(Instant::now());
         app.handle_stream_event(stream::Event::Text("abcd".into()));
-        assert_eq!(app.turn_chars, 4, "conta o que veio pra estimar tokens");
+        assert_eq!(app.turn_chars, 4, "counts what arrived to estimate tokens");
 
         app.handle_stream_event(stream::Event::Done);
-        assert!(app.turn_started.is_none(), "terminou: some a linha de atividade");
+        assert!(app.turn_started.is_none(), "finished: the activity line goes away");
     }
 
     #[test]
@@ -3478,10 +3479,10 @@ mod tests {
                 .collect()
         };
         let esperado = "palavra".repeat(12);
-        assert!(seq(&sem_buddy, 100).contains(&esperado), "sem buddy a mensagem inteira aparece");
+        assert!(seq(&sem_buddy, 100).contains(&esperado), "with no buddy the whole message shows");
         assert!(
             seq(&com_buddy, borda).contains(&esperado),
-            "com o buddy aberto nenhum trecho pode sumir: o texto tem que reembrulhar mais estreito"
+            "with the buddy open no stretch may vanish: the text has to rewrap narrower"
         );
     }
 
@@ -3500,12 +3501,12 @@ mod tests {
         app.scroll_by(3); // one wheel notch up
         assert_eq!(app.scroll, 3);
         let painted = render_to_lines(&mut app, 80, 24);
-        assert!(painted.iter().any(|l| l.contains("mais 3 linhas")), "avisa que há coisa abaixo: {painted:?}");
+        assert!(painted.iter().any(|l| l.contains("3 more lines")), "avisa que há coisa abaixo: {painted:?}");
 
         // Can't scroll past the first line...
         app.scroll_by(9999);
         let top = app.scroll;
-        assert_eq!(top, app.chat_total.saturating_sub(app.chat_rows), "para na primeira linha");
+        assert_eq!(top, app.chat_total.saturating_sub(app.chat_rows), "stops at the first row");
         let painted = render_to_lines(&mut app, 80, 24);
         assert!(painted.iter().any(|l| l.contains("linha 0")), "topo à vista: {painted:?}");
 
@@ -3563,10 +3564,10 @@ mod tests {
         assert_eq!(app.session_id.as_deref(), Some("sess-9"));
         let chat: Vec<(bool, String)> =
             app.chat.iter().map(|m| (matches!(m.role, ChatRole::User), m.text.clone())).collect();
-        assert!(chat.contains(&(true, "resuma o projeto".to_string())), "fala do usuário: {chat:?}");
-        assert!(chat.contains(&(false, "É um app Rails.".to_string())), "resposta do mestre: {chat:?}");
-        assert!(!chat.iter().any(|(_, t)| t.contains("playbook")), "playbook não vai pra tela");
-        assert!(app.chat.iter().any(|m| m.text.contains("fim do histórico")), "marca onde o passado acaba");
+        assert!(chat.contains(&(true, "resuma o projeto".to_string())), "user speech: {chat:?}");
+        assert!(chat.contains(&(false, "É um app Rails.".to_string())), "master answer: {chat:?}");
+        assert!(!chat.iter().any(|(_, t)| t.contains("playbook")), "the playbook does not reach the screen");
+        assert!(app.chat.iter().any(|m| m.text.contains("end of history")), "marks where the past ends");
     }
 
     #[test]
@@ -3580,7 +3581,7 @@ mod tests {
         app.resume_picker_confirm();
         // Best-effort: no transcript (other CLI, cleaned history) is not a failure.
         assert_eq!(app.session_id.as_deref(), Some("nada"));
-        assert!(app.chat.iter().any(|m| m.text.contains("retomando sessão")));
+        assert!(app.chat.iter().any(|m| m.text.contains("resuming session")));
     }
 
     #[test]
@@ -3594,15 +3595,15 @@ mod tests {
         assert!(matches!(app.mode, Mode::ScanOffer { .. }));
         // The question lives in the overlay, not in the chat log — as a log
         // line it read as scrollback and got typed straight past.
-        assert!(!app.chat.iter().any(|m| m.text.contains(scan::CONTEXT_FILE)), "pergunta não vai pro log");
+        assert!(!app.chat.iter().any(|m| m.text.contains(scan::CONTEXT_FILE)), "the question does not reach the log");
         let painted = render_to_lines(&mut app, 100, 40);
-        assert!(painted.iter().any(|l| l.contains("Escaneio")), "overlay pergunta: {painted:?}");
+        assert!(painted.iter().any(|l| l.contains("Scan ")), "overlay pergunta: {painted:?}");
         assert!(painted.iter().any(|l| l.contains(scan::CONTEXT_FILE)));
-        assert!(painted.iter().any(|l| l.contains("sim, escanear")));
+        assert!(painted.iter().any(|l| l.contains("yes, scan it")));
 
         app.answer_scan_offer(false);
         assert!(matches!(app.mode, Mode::Normal));
-        assert!(app.scan_rx.is_none(), "não é pra ter disparado scan nenhum");
+        assert!(app.scan_rx.is_none(), "no scan should have been fired");
 
         // Segunda abertura no mesmo diretório: silêncio.
         let mut app2 = App::new(&config, dir.to_str().unwrap());
@@ -3647,12 +3648,12 @@ mod tests {
         app.history_prev();
         assert_eq!(app.input, "primeira");
         app.history_prev();
-        assert_eq!(app.input, "primeira", "para na mais antiga, não some");
+        assert_eq!(app.input, "primeira", "stops at the oldest, does not vanish");
 
         app.history_next();
         assert_eq!(app.input, "segunda");
         app.history_next();
-        assert_eq!(app.input, "", "passou da mais nova: volta pro input vazio");
+        assert_eq!(app.input, "", "past the newest: back to an empty input");
         assert!(app.history_idx.is_none());
     }
 
@@ -3660,13 +3661,13 @@ mod tests {
     fn history_restores_the_half_typed_draft() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
-        app.history_push("comando antigo");
-        app.input = "estava escrevendo isso".into();
+        app.history_push("old command");
+        app.input = "was typing this".into();
 
         app.history_prev();
-        assert_eq!(app.input, "comando antigo");
+        assert_eq!(app.input, "old command");
         app.history_next();
-        assert_eq!(app.input, "estava escrevendo isso", "o rascunho volta intacto");
+        assert_eq!(app.input, "was typing this", "o rascunho volta intacto");
     }
 
     #[test]
@@ -3678,7 +3679,7 @@ mod tests {
         assert_eq!(app.history.len(), 1);
         app.history_push("outra");
         app.history_push("igual");
-        assert_eq!(app.history.len(), 3, "não-consecutiva entra de novo");
+        assert_eq!(app.history.len(), 3, "a non-consecutive one goes in again");
     }
 
     #[test]
@@ -3687,7 +3688,7 @@ mod tests {
         let mut app = App::new(&config, "/tmp/repo");
         app.input = "rascunho".into();
         app.history_prev();
-        assert_eq!(app.input, "rascunho", "sem histórico, ↑ não mexe no input");
+        assert_eq!(app.input, "rascunho", "with no history, ↑ leaves the input alone");
     }
 
     #[test]
@@ -3697,7 +3698,7 @@ mod tests {
         app.history_push("/help");
         app.history_prev();
         assert_eq!(app.input, "/help");
-        assert!(!app.menu_open(), "↑↓ seguem sendo histórico até digitar de novo");
+        assert!(!app.menu_open(), "↑↓ keep browsing history until you type again");
         // Digitar re-arma o popup.
         app.input_insert('x');
         app.input_backspace();

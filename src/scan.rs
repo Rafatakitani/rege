@@ -179,55 +179,55 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// model spends its budget on judgement, not on `ls`.
 pub fn prompt(f: &Facts) -> String {
     let mut s = String::new();
-    s.push_str("Escreva o conteúdo de um arquivo AGENTS.md para o diretório abaixo.\n");
-    s.push_str("É um documento curto que orienta agentes de IA que vão trabalhar aqui.\n\n");
+    s.push_str("Write the contents of an AGENTS.md file for the directory below.\n");
+    s.push_str("It is a short document guiding AI agents that will work here.\n\n");
     if f.is_home {
         s.push_str(
-            "ATENÇÃO: este diretório é a HOME do usuário, não um projeto. \
-             Descreva-o como espaço de trabalho pessoal — o que mora aqui e como se orientar. \
-             Não invente que é um monorepo nem descreva arquitetura de software.\n\n",
+            "WARNING: this directory is the user's HOME, not a project. \
+             Describe it as a personal workspace — what lives here and how to get around. \
+             Do not pretend it is a monorepo and do not describe software architecture.\n\n",
         );
     }
-    s.push_str(&format!("diretório: {}\n", f.dir.display()));
+    s.push_str(&format!("directory: {}\n", f.dir.display()));
     match (&f.branch, &f.remote) {
         (Some(b), Some(r)) => s.push_str(&format!("git: branch {b}, remote {r}\n")),
-        (Some(b), None) => s.push_str(&format!("git: branch {b}, sem remote\n")),
-        _ => s.push_str("git: não é um repositório\n"),
+        (Some(b), None) => s.push_str(&format!("git: branch {b}, no remote\n")),
+        _ => s.push_str("git: not a repository\n"),
     }
     if !f.langs.is_empty() {
         let langs: Vec<String> = f.langs.iter().map(|(e, n)| format!(".{e} ({n})")).collect();
-        s.push_str(&format!("extensões mais comuns: {}\n", langs.join(", ")));
+        s.push_str(&format!("most common extensions: {}\n", langs.join(", ")));
     }
     if !f.markers.is_empty() {
-        s.push_str(&format!("manifestos: {}\n", f.markers.join(", ")));
+        s.push_str(&format!("manifests: {}\n", f.markers.join(", ")));
     }
     if !f.commands.is_empty() {
-        s.push_str(&format!("comandos prováveis: {}\n", f.commands.join(" · ")));
+        s.push_str(&format!("likely commands: {}\n", f.commands.join(" · ")));
     }
     if f.truncated {
-        s.push_str("(varredura truncada no teto de arquivos — a listagem é parcial)\n");
+        s.push_str("(walk truncated at the file ceiling — the listing is partial)\n");
     }
     if !f.tree.is_empty() {
-        s.push_str(&format!("\nestrutura (até 2 níveis):\n{}\n", f.tree.join("\n")));
+        s.push_str(&format!("\nstructure (up to 2 levels):\n{}\n", f.tree.join("\n")));
     }
     if let Some(r) = &f.readme {
-        s.push_str(&format!("\nREADME (início):\n{r}\n"));
+        s.push_str(&format!("\nREADME (beginning):\n{r}\n"));
     }
     s.push_str(
-        "\nSe já existir um AGENTS.md neste diretório, ignore-o: você está escrevendo \
-         a versão nova do zero. Não pergunte nada, não ofereça opções, não comente \
-         a tarefa — a sua resposta inteira vai virar o arquivo, literalmente.\n",
+        "\nIf an AGENTS.md already exists in this directory, ignore it: you are writing \
+         the new version from scratch. Do not ask anything, do not offer options, do not \
+         comment on the task — your entire answer becomes the file, literally.\n",
     );
     s.push_str(
-        "\nVocê não tem ferramentas nesta sessão e não precisa delas: tudo que é pra \
-         estar no arquivo já está nos dados acima. Não tente escrever o arquivo você \
-         mesmo e não escreva aviso nenhum sobre não ter podido inspecionar o repo.\n",
+        "\nYou have no tools in this session and do not need any: everything that belongs \
+         in the file is already in the data above. Do not try to write the file yourself \
+         and do not add any warning about not having inspected the repo.\n",
     );
     s.push_str(
-        "\nResponda APENAS com o markdown do arquivo, sem cercas de código em volta \
-         e sem comentários seus. Seções sugeridas: o que é, como rodar/testar, \
-         estrutura, convenções. Seja específico e curto; não invente o que não \
-         estiver nos dados acima.\n",
+        "\nAnswer ONLY with the file's markdown, with no code fences around it and no \
+         comments of your own. Suggested sections: what it is, how to run/test it, \
+         structure, conventions. Be specific and short; do not invent anything that \
+         is not in the data above.\n",
     );
     s
 }
@@ -273,23 +273,23 @@ pub fn should_offer(dir: &Path, state: &Scanned) -> bool {
 pub fn run(dir: &Path, cfg: &Config, home: &Path, force: bool) -> Result<PathBuf> {
     let target = dir.join(CONTEXT_FILE);
     if target.exists() && !force {
-        bail!("{} já existe — use --force pra sobrescrever", target.display());
+        bail!("{} already exists — use --force to overwrite", target.display());
     }
     let facts = collect(dir, home);
     let mut argv = command::argv(&cfg.master.cli, &prompt(&facts), cfg.master.model.as_deref(), false)?;
     argv.extend(command::text_only_flags(&cfg.master.cli));
     let out = Command::new(&argv[0]).args(&argv[1..]).current_dir(dir).output()?;
     if !out.status.success() {
-        bail!("{} falhou: {}", cfg.master.cli, String::from_utf8_lossy(&out.stderr).trim());
+        bail!("{} failed: {}", cfg.master.cli, String::from_utf8_lossy(&out.stderr).trim());
     }
     let body = strip_fences(String::from_utf8_lossy(&out.stdout).trim());
     if body.is_empty() {
-        bail!("o mestre respondeu vazio");
+        bail!("the master answered with nothing");
     }
     if !looks_like_a_document(&body) {
         bail!(
-            "o mestre respondeu conversando, não com um documento — nada foi escrito. \
-             resposta:\n{body}"
+            "the master answered with conversation, not a document — nothing was written. \
+             answer:\n{body}"
         );
     }
     std::fs::write(&target, format!("{body}\n"))?;
@@ -297,7 +297,7 @@ pub fn run(dir: &Path, cfg: &Config, home: &Path, force: bool) -> Result<PathBuf
 }
 
 /// The master's stdout becomes the file byte for byte, so a chatty answer
-/// ("já existe, quer que eu…") would silently replace a hand-written AGENTS.md.
+/// ("already exists, would you like me to…") would silently replace a hand-written AGENTS.md.
 /// A real document opens with a heading and isn't three lines long.
 fn looks_like_a_document(body: &str) -> bool {
     let has_heading = body.lines().next().is_some_and(|l| l.trim_start().starts_with('#'));
@@ -365,13 +365,13 @@ mod tests {
         let d = tmp("home");
         let f = collect(&d, &d);
         assert!(f.is_home);
-        assert!(prompt(&f).contains("HOME do usuário"), "o prompt precisa avisar o modelo");
+        assert!(prompt(&f).contains("user's HOME"), "the prompt has to warn the model");
     }
 
     #[test]
     fn commands_dedupe_across_manifests() {
         let markers = vec!["pyproject.toml".to_string(), "requirements.txt".to_string()];
-        assert_eq!(commands_for(&markers), vec!["pytest"], "pytest não entra duas vezes");
+        assert_eq!(commands_for(&markers), vec!["pytest"], "pytest must not appear twice");
     }
 
     #[test]
@@ -383,7 +383,7 @@ mod tests {
         assert!(p.contains("go.mod"));
         assert!(p.contains("go test ./..."));
         assert!(p.contains(".go (1)"));
-        assert!(p.contains("não é um repositório"));
+        assert!(p.contains("not a repository"));
     }
 
     #[test]
@@ -393,18 +393,18 @@ mod tests {
         assert!(should_offer(&d, &state), "pasta virgem: pergunta");
 
         state.dirs.insert(d.to_string_lossy().to_string(), "no".into());
-        assert!(!should_offer(&d, &state), "já recusou: nunca mais");
+        assert!(!should_offer(&d, &state), "already declined: never again");
 
         let d2 = tmp("offer-existing");
         fs::write(d2.join(CONTEXT_FILE), "# já tem\n").unwrap();
-        assert!(!should_offer(&d2, &Scanned::default()), "já tem AGENTS.md: não pergunta");
+        assert!(!should_offer(&d2, &Scanned::default()), "AGENTS.md is there: do not ask");
     }
 
     #[test]
     fn state_roundtrips_through_yaml() {
         let d = tmp("state");
         let p = d.join("config/rege/scanned.yml");
-        assert_eq!(load_state(&p), Scanned::default(), "arquivo ausente = estado vazio");
+        assert_eq!(load_state(&p), Scanned::default(), "missing file = empty state");
 
         record(&p, Path::new("/projeto/x"), "no").unwrap();
         record(&p, Path::new("/projeto/y"), "yes").unwrap();
@@ -425,9 +425,9 @@ mod tests {
     #[test]
     fn a_chatty_answer_is_not_a_document() {
         // The real regression: `scan --force` replaced a 88-line AGENTS.md with this.
-        let chat = "AGENTS.md já existe, com conteúdo bem específico.\n\nQuer que eu:\n1. mantenha,\n2. atualize?";
+        let chat = "AGENTS.md already exists, with very specific content.\n\nWould you like me to:\n1. keep it,\n2. update it?";
         assert!(!looks_like_a_document(chat));
-        assert!(!looks_like_a_document("# Projeto\n\nfaz X."), "duas linhas é resposta, não arquivo");
+        assert!(!looks_like_a_document("# Projeto\n\nfaz X."), "two lines is an answer, not a file");
         assert!(looks_like_a_document("# Projeto\n\nfaz X.\n\n## Testes\n\n`cargo test`"));
     }
 
@@ -436,8 +436,8 @@ mod tests {
         let d = tmp("no-chat");
         fs::write(d.join(CONTEXT_FILE), "# já tem\n").unwrap();
         let p = prompt(&collect(&d, Path::new("/outro")));
-        assert!(p.contains("ignore-o"), "o modelo precisa saber pra ignorar o arquivo atual");
-        assert!(p.contains("Não pergunte nada"));
+        assert!(p.contains("ignore it"), "the model has to know to ignore the current file");
+        assert!(p.contains("Do not ask anything"));
     }
 
     #[test]

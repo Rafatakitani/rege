@@ -39,7 +39,7 @@ const FAST_PROFILE: &str = "fastinstall";
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("REGE_GIT_HASH"), ")");
 
 #[derive(Parser)]
-#[command(name = "rege", version = VERSION, about = "Orquestrador multi-agente de IAs")]
+#[command(name = "rege", version = VERSION, about = "Multi-agent AI orchestrator")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -47,53 +47,53 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Roda o mestre headless numa tarefa e imprime (tipo `codex exec`).
+    /// Run the master headless on a task and print the result (like `codex exec`).
     Exec {
-        /// A tarefa
+        /// The task
         task: Vec<String>,
     },
-    /// Checa os bots do roster.
+    /// Check the roster's bots.
     Doctor,
-    /// Mostra a config efetiva.
+    /// Show the effective config.
     Config,
-    /// Roda o servidor MCP (JSON-RPC 2.0 newline-delimited sobre stdio).
+    /// Run the MCP server (newline-delimited JSON-RPC 2.0 over stdio).
     McpServe {
-        /// Repo alvo pros agentes/worktrees.
+        /// Target repo for agents/worktrees.
         #[arg(long)]
         repo: PathBuf,
     },
-    /// Abre o claude INTERATIVO ja como orquestrador Rege (playbook + MCP + yolo).
+    /// Open claude INTERACTIVE, already wired as the rege orchestrator (playbook + MCP + yolo).
     Claude,
-    /// Atualiza o rege pra última versão (cargo install --git ... --force).
+    /// Update rege to the latest version (cargo install --git ... --force).
     Update {
-        /// URL do repositório (default: upstream oficial).
+        /// Repository URL (default: the official upstream).
         #[arg(long, default_value = REGE_GIT_URL)]
         git: String,
-        /// Branch, tag ou rev específico (default: branch padrão do repo).
+        /// Specific branch, tag or rev (default: the repo's default branch).
         #[arg(long)]
         branch: Option<String>,
-        /// Mostra o output cru do cargo (compilação linha a linha).
+        /// Show cargo's raw output (line-by-line compilation).
         #[arg(long, short)]
         verbose: bool,
-        /// Recompila mesmo que o remoto esteja no commit já instalado.
+        /// Rebuild even when the remote is on the commit already installed.
         #[arg(long, short)]
         force: bool,
     },
-    /// Escaneia o diretório atual e escreve um AGENTS.md descrevendo ele.
+    /// Scan the current directory and write an AGENTS.md describing it.
     Scan {
-        /// Sobrescreve um AGENTS.md existente.
+        /// Overwrite an existing AGENTS.md.
         #[arg(long)]
         force: bool,
     },
-    /// Renderiza um frame da TUI como texto (headless, sem tty) pra inspeção/debug.
+    /// Render one TUI frame as text (headless, no tty) for inspection/debug.
     Render {
-        /// Semeia estado de exemplo (chat + agentes).
+        /// Seed example state (chat + agents).
         #[arg(long)]
         demo: bool,
-        /// Largura em colunas.
+        /// Width in columns.
         #[arg(long, default_value_t = 100)]
         cols: u16,
-        /// Altura em linhas.
+        /// Height in rows.
         #[arg(long, default_value_t = 32)]
         rows: u16,
     },
@@ -133,7 +133,7 @@ fn main() -> Result<()> {
 /// Headless run: seed the master with the playbook + task, stream to stdout.
 fn exec(cfg: &Config, task: &str) -> Result<()> {
     if task.trim().is_empty() {
-        eprintln!("uso: rege exec \"<tarefa>\"");
+        eprintln!("usage: rege exec \"<task>\"");
         std::process::exit(2);
     }
     // exec = headless ORCHESTRATOR (like `codex exec`, but the master commands
@@ -151,10 +151,10 @@ fn exec(cfg: &Config, task: &str) -> Result<()> {
         }}
     })
     .to_string();
-    let seed = format!("{}\n\nTarefa: {}", playbook::prompt(cfg), task);
+    let seed = format!("{}\n\nTask: {}", playbook::prompt(cfg), task);
 
     if cfg.master.cli != "claude" {
-        eprintln!("exec orquestrador so suporta master=claude por ora (atual: {})", cfg.master.cli);
+        eprintln!("the orchestrator exec only supports master=claude for now (current: {})", cfg.master.cli);
         std::process::exit(2);
     }
     let mut a: Vec<String> = vec![
@@ -176,7 +176,7 @@ fn exec(cfg: &Config, task: &str) -> Result<()> {
 /// so you chat with the master directly (`rege claude` ~ `claude --rege`).
 fn claude_orchestrator(cfg: &Config) -> Result<()> {
     if cfg.master.cli != "claude" {
-        eprintln!("`rege claude` so suporta master=claude (atual: {})", cfg.master.cli);
+        eprintln!("`rege claude` only supports master=claude (current: {})", cfg.master.cli);
         std::process::exit(2);
     }
     let repo = std::env::current_dir()?;
@@ -216,15 +216,15 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, force: bool, home: &Pa
     // running it out of habit does.
     match remote_head(git, branch) {
         Probe::Sha(head) if !force && already_current(&head, env!("REGE_GIT_HASH")) => {
-            println!("rege já está na última ({VERSION}). `--force` reinstala mesmo assim.");
+            println!("rege is already up to date ({VERSION}). `--force` reinstalls anyway.");
             return Ok(());
         }
         // No network now means no network for cargo's own fetch either: the
         // clone is the first thing it does. Saying so costs a second, where
         // letting cargo find out costs a minute of stalled fetch.
         Probe::Offline => {
-            eprintln!("sem rede: não deu pra falar com {git}.");
-            eprintln!("o update precisa buscar o repositório — tente de novo quando a conexão voltar.");
+            eprintln!("no network: could not reach {git}.");
+            eprintln!("the update has to fetch the repository — try again once you are back online.");
             std::process::exit(1);
         }
         _ => {}
@@ -237,9 +237,9 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, force: bool, home: &Pa
     // own directory avoids promising "warm cache" on a one-minute build.
     let first = !warm_cache(&cache, FAST_PROFILE);
     if first {
-        println!("atualizando rege{which}… (compilando, ~1min)");
+        println!("updating rege{which}… (compiling, ~1min)");
     } else {
-        println!("atualizando rege{which}… (compilando, cache quente)");
+        println!("updating rege{which}… (compiling, warm cache)");
     }
 
     // Quiet by default: 90 lines of `Compiling foo v1.2.3` say nothing. The
@@ -268,9 +268,9 @@ fn update(git: &str, branch: Option<&str>, verbose: bool, force: bool, home: &Pa
     if !ok {
         eprint!("{}", tail_lines(&err, 20));
         if looks_like_network_failure(&err) {
-            eprintln!("o fetch do repositório não passou — sem rede, ou DNS/proxy no caminho.");
+            eprintln!("the repository fetch did not go through — no network, or DNS/proxy in the way.");
         }
-        eprintln!("falha ao atualizar. `rege update --verbose` pro output completo.");
+        eprintln!("update failed. `rege update --verbose` for the full output.");
         std::process::exit(1);
     }
     report_installed_version();
@@ -376,8 +376,8 @@ fn report_installed_version() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
     match installed {
-        Some(v) => println!("✓ atualizado: {v} (era {VERSION})"),
-        None => println!("✓ rege atualizado. `rege --version` pra conferir."),
+        Some(v) => println!("✓ updated: {v} (was {VERSION})"),
+        None => println!("✓ rege updated. `rege --version` to check."),
     }
 }
 
@@ -397,7 +397,7 @@ fn warm_cache(cache: &Path, profile: &str) -> bool {
 }
 
 fn cargo_missing(e: std::io::Error) -> ! {
-    eprintln!("falha ao rodar cargo (instalado? no PATH?): {e}");
+    eprintln!("could not run cargo (installed? on PATH?): {e}");
     std::process::exit(1);
 }
 
@@ -440,10 +440,10 @@ fn cargo_update_args(git: &str, branch: Option<&str>, verbose: bool, profile: Op
 /// One-shot context scan of `dir`. Also records the directory as answered, so
 /// the TUI doesn't turn around and offer what was just done by hand.
 fn scan_dir(dir: &Path, cfg: &Config, home: &Path, force: bool) -> Result<()> {
-    println!("escaneando {}… (uma chamada ao mestre)", dir.display());
+    println!("scanning {}… (one call to the master)", dir.display());
     let path = scan::run(dir, cfg, home, force)?;
     let _ = scan::record(&scan::state_path(home), dir, "yes");
-    println!("✓ escrito: {}", path.display());
+    println!("✓ written: {}", path.display());
     Ok(())
 }
 
@@ -460,9 +460,9 @@ fn mcp_serve(home: &Path, repo: &Path) -> Result<()> {
 
 fn doctor(cfg: &Config) -> Result<()> {
     if let Some(m) = &cfg.master.model {
-        println!("mestre: {} ({})", cfg.master.cli, m);
+        println!("master: {} ({})", cfg.master.cli, m);
     } else {
-        println!("mestre: {}", cfg.master.cli);
+        println!("master: {}", cfg.master.cli);
     }
     println!("health check:");
     for cli in cfg.distinct_clis() {
@@ -604,9 +604,9 @@ mod tests {
         let d = std::env::temp_dir().join(format!("rege-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        assert!(!warm_cache(&d, FAST_PROFILE), "sem o subdiretório do perfil é frio");
+        assert!(!warm_cache(&d, FAST_PROFILE), "without the profile subdirectory it is cold");
         std::fs::create_dir_all(d.join(FAST_PROFILE)).unwrap();
-        assert!(!warm_cache(&d, FAST_PROFILE), "subdiretório vazio ainda é frio");
+        assert!(!warm_cache(&d, FAST_PROFILE), "an empty subdirectory is still cold");
         std::fs::write(d.join(FAST_PROFILE).join("rege"), "x").unwrap();
         assert!(warm_cache(&d, FAST_PROFILE));
         // Another profile's cache doesn't count.
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn the_fast_profile_exists_in_cargo_toml() {
         let toml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
-        assert!(toml.contains(&format!("[profile.{FAST_PROFILE}]")), "perfil sumiu do Cargo.toml");
+        assert!(toml.contains(&format!("[profile.{FAST_PROFILE}]")), "profile gone from Cargo.toml");
     }
 
     #[test]

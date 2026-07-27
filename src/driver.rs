@@ -36,7 +36,7 @@ pub fn spawn_turn(
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(Event::Text(format!("erro ao iniciar mestre: {e}")));
+            let _ = tx.send(Event::Text(format!("could not start the master: {e}")));
             return;
         }
     };
@@ -80,7 +80,7 @@ fn build_argv(
     .to_string();
 
     let seed = match (session_id, playbook) {
-        (None, Some(playbook)) => format!("{playbook}\n\nTarefa: {task}"),
+        (None, Some(playbook)) => format!("{playbook}\n\nTask: {task}"),
         _ => task.to_string(),
     };
 
@@ -112,8 +112,8 @@ mod tests {
 
     #[test]
     fn build_argv_first_turn_includes_playbook_and_no_resume() {
-        let argv = build_argv(None, "/repo", Some("PLAYBOOK"), "faz algo", None);
-        assert!(argv.contains(&"PLAYBOOK\n\nTarefa: faz algo".to_string()));
+        let argv = build_argv(None, "/repo", Some("PLAYBOOK"), "do something", None);
+        assert!(argv.contains(&"PLAYBOOK\n\nTask: do something".to_string()));
         assert!(!argv.contains(&"--resume".to_string()));
         assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));
     }

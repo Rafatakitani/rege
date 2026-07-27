@@ -195,7 +195,7 @@ mod tests {
 
     fn run(dir: &Path, args: &[&str]) {
         let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
-        assert!(status.success(), "git {:?} falhou", args);
+        assert!(status.success(), "git {:?} failed", args);
     }
 
     fn tmux_available() -> bool {
@@ -211,7 +211,7 @@ mod tests {
     macro_rules! skip_if_no_tmux {
         () => {
             if !tmux_available() {
-                eprintln!("skip: tmux nao instalado");
+                eprintln!("skip: tmux not installed");
                 return;
             }
         };
