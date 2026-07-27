@@ -2026,7 +2026,7 @@ fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
     let (prefix, prefix_role, body_role) = match m.role {
         ChatRole::User => unreachable!("tratado acima"),
         ChatRole::Assistant => ("● ", Role::Accent, Role::Text),
-        ChatRole::Tool => ("● ", Role::Accent2, Role::Dim),
+        ChatRole::Tool => ("● ", Role::Accent2, Role::Text),
         ChatRole::ToolResult => ("  ⎿  ", Role::Dim, Role::Dim),
         ChatRole::Info => ("", Role::Dim, Role::Dim),
         ChatRole::Error => ("", Role::Fail, Role::Fail),
@@ -2042,7 +2042,7 @@ fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
             // Inside a fence the text is code, not prose: no `**`/backtick
             // parsing, or a shell one-liner loses characters to the renderer.
             let body = if code {
-                vec![styled(theme, Role::Accent, seg)]
+                vec![styled(theme, Role::Accent2, seg)]
             } else {
                 markdown_spans(theme, &seg, body_role)
             };
@@ -2086,7 +2086,7 @@ fn markdown_spans(theme: &str, line: &str, body_role: Role) -> Vec<Span<'static>
     if trimmed.starts_with('#') {
         let text = trimmed.trim_start_matches('#').trim_start();
         if !text.is_empty() {
-            return vec![styled(theme, Role::Accent2, text.to_string()).add_modifier(Modifier::BOLD)];
+            return vec![styled(theme, Role::Strong, text.to_string()).add_modifier(Modifier::BOLD)];
         }
     }
 
@@ -2098,10 +2098,10 @@ fn markdown_spans(theme: &str, line: &str, body_role: Role) -> Vec<Span<'static>
         let code = rest.find('`').filter(|i| rest[i + 1..].contains('`'));
         // Whichever mark opens first wins; ties can't happen (different chars).
         let (at, close, len, role, bolded) = match (bold, code) {
-            (Some(b), Some(c)) if b < c => (b, "**", 2, Role::Text, true),
-            (Some(_), Some(c)) => (c, "`", 1, Role::Accent, false),
-            (Some(b), None) => (b, "**", 2, Role::Text, true),
-            (None, Some(c)) => (c, "`", 1, Role::Accent, false),
+            (Some(b), Some(c)) if b < c => (b, "**", 2, Role::Strong, true),
+            (Some(_), Some(c)) => (c, "`", 1, Role::Accent2, false),
+            (Some(b), None) => (b, "**", 2, Role::Strong, true),
+            (None, Some(c)) => (c, "`", 1, Role::Accent2, false),
             (None, None) => break,
         };
         plain.push_str(&rest[..at]);
