@@ -30,7 +30,7 @@ impl Worktree {
             None => {
                 let repo_name = repo
                     .file_name()
-                    .ok_or_else(|| anyhow!("repo sem nome de diretorio"))?;
+                    .ok_or_else(|| anyhow!("repo has no directory name"))?;
                 std::env::temp_dir().join("rege-worktrees").join(repo_name)
             }
         };
@@ -133,7 +133,7 @@ impl Worktree {
             .output()?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("git {} falhou: {}", args.join(" "), err));
+            return Err(anyhow!("git {} failed: {}", args.join(" "), err));
         }
         Ok(())
     }
@@ -154,7 +154,7 @@ impl Worktree {
         let output = Command::new("git").arg("-C").arg(dir).args(args).output()?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("git {} falhou: {}", args.join(" "), err));
+            return Err(anyhow!("git {} failed: {}", args.join(" "), err));
         }
         Ok(())
     }
@@ -180,7 +180,7 @@ mod tests {
 
     fn run(dir: &Path, args: &[&str]) {
         let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
-        assert!(status.success(), "git {:?} falhou", args);
+        assert!(status.success(), "git {:?} failed", args);
     }
 
     #[test]

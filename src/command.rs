@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(f.first().map(String::as_str), Some("--disallowedTools"));
         // Write is the one that actually blocked on a permission prompt.
         assert!(f.contains(&"Write".to_string()));
-        assert!(text_only_flags("codex").is_empty(), "sem flag conhecida: melhor vazio que chute");
+        assert!(text_only_flags("codex").is_empty(), "no known flag: better empty than a guess");
     }
 
     #[test]

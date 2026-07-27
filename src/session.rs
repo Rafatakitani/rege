@@ -205,7 +205,7 @@ impl<'a> Session<'a> {
                 .current_dir(&self.repo)
                 .output()?;
             if !out.status.success() {
-                anyhow::bail!("gh pr create falhou: {}", String::from_utf8_lossy(&out.stderr));
+                anyhow::bail!("gh pr create failed: {}", String::from_utf8_lossy(&out.stderr));
             }
             let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
             Ok(json!({ "mode": "pr", "ref": url }))
@@ -226,14 +226,14 @@ impl<'a> Session<'a> {
     fn with_agent<F: FnOnce(&Agent) -> Value>(&self, id: &str, f: F) -> Value {
         match self.find(id) {
             Some(a) => f(a),
-            None => json!({ "error": format!("agente inexistente: {id}") }),
+            None => json!({ "error": format!("no such agent: {id}") }),
         }
     }
 
     fn with_agent_mut<F: FnOnce(&mut Agent) -> Value>(&mut self, id: &str, f: F) -> Value {
         match self.find_mut(id) {
             Some(a) => f(a),
-            None => json!({ "error": format!("agente inexistente: {id}") }),
+            None => json!({ "error": format!("no such agent: {id}") }),
         }
     }
 }
@@ -272,7 +272,7 @@ fn write_patch(repo: &Path, branch: &str) -> Result<PathBuf> {
     let base = default_branch(repo)?;
     let out = Proc::new("git").arg("-C").arg(repo).arg("diff").arg(format!("{base}...{branch}")).output()?;
     if !out.status.success() {
-        anyhow::bail!("git diff falhou: {}", String::from_utf8_lossy(&out.stderr));
+        anyhow::bail!("git diff failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     let dir = repo.join(".rege-runs");
     std::fs::create_dir_all(&dir)?;
@@ -307,7 +307,7 @@ mod tests {
 
     fn run(dir: &Path, args: &[&str]) {
         let status = Proc::new("git").arg("-C").arg(dir).args(args).status().unwrap();
-        assert!(status.success(), "git {:?} falhou", args);
+        assert!(status.success(), "git {:?} failed", args);
     }
 
     fn tmux_available() -> bool {
@@ -323,7 +323,7 @@ mod tests {
     macro_rules! skip_if_no_tmux {
         () => {
             if !tmux_available() {
-                eprintln!("skip: tmux nao instalado");
+                eprintln!("skip: tmux not installed");
                 return;
             }
         };
@@ -343,7 +343,7 @@ mod tests {
         let config = Config::default();
         let mut session = Session::new(&repo, &config);
         let v = session.agent_status("nope");
-        assert_eq!(v["error"], json!("agente inexistente: nope"));
+        assert_eq!(v["error"], json!("no such agent: nope"));
     }
 
     #[test]
@@ -411,11 +411,11 @@ mod tests {
             .spawn_agent("claude", "t", None, None, Some("exit 0".to_string()))
             .unwrap();
         let path = repo.join(".rege-runs").join(format!("run-{}.json", crate::agent::run_id()));
-        assert!(path.exists(), "manifest nao escrito");
+        assert!(path.exists(), "manifest not written");
         let v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["agents"][0]["agent_id"], json!("a1"));
         let branch = v["agents"][0]["branch"].as_str().unwrap();
-        assert!(branch.starts_with("rege/") && branch.ends_with("-a1"), "branch nao scopado: {branch}");
+        assert!(branch.starts_with("rege/") && branch.ends_with("-a1"), "branch not scoped: {branch}");
         session.engine.shutdown();
     }
 

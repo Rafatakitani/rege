@@ -1,6 +1,6 @@
 //! Reads back the master's past conversation from the driver CLI's own
 //! transcript, so `/resume` can show what was said instead of an empty screen
-//! with "retomando sessão: <título>".
+//! with "resuming session: <title>".
 //!
 //! Only `claude` is supported: it keeps a JSONL transcript per session under
 //! `~/.claude/projects/<slug>/<session-id>.jsonl`, and this reads that file.
@@ -31,10 +31,15 @@ pub fn transcript_path(home: &Path, repo: &str, session_id: &str) -> PathBuf {
 /// The first turn carries the whole playbook ahead of the real request, since
 /// that's how the master is seeded. Show only what the user actually typed.
 fn strip_playbook(text: &str) -> &str {
-    match text.rfind("\n\nTarefa: ") {
-        Some(i) => &text[i + "\n\nTarefa: ".len()..],
-        None => text,
+    // `Tarefa:` is the marker rege used before the UI moved to English.
+    // Transcripts already on disk still carry it, and `/resume` has to keep
+    // reading them — dropping it would replay the whole playbook on screen.
+    for marker in ["\n\nTask: ", "\n\nTarefa: "] {
+        if let Some(i) = text.rfind(marker) {
+            return &text[i + marker.len()..];
+        }
     }
+    text
 }
 
 /// Extracts the visible conversation. Anything unparseable is skipped rather

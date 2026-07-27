@@ -201,11 +201,11 @@ mod tests {
         for n in names() {
             let (accent, accent2) = (color(n, Role::Accent), color(n, Role::Accent2));
             let (dim, text, strong) = (color(n, Role::Dim), color(n, Role::Text), color(n, Role::Strong));
-            assert!(dist(accent, accent2) >= 100.0, "{n}: código e marcas do tema na mesma cor");
-            assert!(dist(text, dim) >= 90.0, "{n}: prosa e chrome na mesma cor");
-            assert!(dist(text, accent2) >= 60.0, "{n}: código não se destaca da prosa");
-            assert!(lum(dim) >= 0.40, "{n}: dim escuro demais pra ler no fundo do terminal");
-            assert!(lum(strong) > lum(text), "{n}: negrito tem que subir, não descer");
+            assert!(dist(accent, accent2) >= 100.0, "{n}: code and the theme marks share one color");
+            assert!(dist(text, dim) >= 90.0, "{n}: prose and chrome share one color");
+            assert!(dist(text, accent2) >= 60.0, "{n}: code does not stand out from prose");
+            assert!(lum(dim) >= 0.40, "{n}: dim too dark to read on the terminal background");
+            assert!(lum(strong) > lum(text), "{n}: bold has to go up, not down");
         }
     }
 
