@@ -7,6 +7,7 @@ mod command;
 mod config;
 mod driver;
 mod engine;
+mod grill;
 mod mcp;
 mod playbook;
 mod rtk;

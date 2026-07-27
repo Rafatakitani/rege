@@ -6,6 +6,7 @@
 use crate::command;
 use crate::config::{Config, RosterEntry};
 use crate::driver;
+use crate::grill;
 use crate::playbook;
 use crate::scan;
 use crate::sessions::{self, SessionRec};
@@ -102,6 +103,37 @@ impl ChatRole {
 struct ChatMsg {
     role: ChatRole,
     text: String,
+}
+
+/// What the first-run overlay offers. Three routes to the same file, and the
+/// answer is recorded either way so the question is asked once per directory.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Offer {
+    /// The master interviews the user, then writes the docs.
+    Grill,
+    /// One-shot read of the tree into an AGENTS.md.
+    Scan,
+    No,
+}
+
+impl Offer {
+    fn from_cursor(cursor: usize) -> Self {
+        match cursor {
+            0 => Offer::Grill,
+            1 => Offer::Scan,
+            _ => Offer::No,
+        }
+    }
+
+    /// What lands in `scanned.yml`. Kept distinct so a later version can tell
+    /// "was interviewed" from "was scanned" without guessing.
+    fn recorded(self) -> &'static str {
+        match self {
+            Offer::Grill => "grill",
+            Offer::Scan => "yes",
+            Offer::No => "no",
+        }
+    }
 }
 
 /// UI mode: normal chat input, or the interactive theme picker overlay.
@@ -856,24 +888,40 @@ impl App {
 
     fn scan_offer_move(&mut self, delta: isize) {
         if let Mode::ScanOffer { cursor } = &mut self.mode {
-            *cursor = if delta < 0 { cursor.saturating_sub(1) } else { (*cursor + 1).min(1) };
+            *cursor = if delta < 0 { cursor.saturating_sub(1) } else { (*cursor + 1).min(2) };
         }
     }
 
-    /// Records the answer so this is asked once per directory, whichever way
-    /// it went, and kicks off the scan on yes.
-    fn answer_scan_offer(&mut self, yes: bool) {
+    /// Records the answer so this is asked once per directory, whichever way it
+    /// went, and starts whichever route was picked.
+    fn answer_scan_offer(&mut self, choice: Offer) {
         self.mode = Mode::Normal;
         let dir = PathBuf::from(&self.repo);
         self.push(ChatRole::Info, format!("first time here ({}).", self.repo));
-        if let Err(e) = scan::record(&self.scanned_path, &dir, if yes { "yes" } else { "no" }) {
+        if let Err(e) = scan::record(&self.scanned_path, &dir, choice.recorded()) {
             self.push(ChatRole::Error, format!("could not record the answer: {e}"));
         }
-        if yes {
-            self.start_scan(false);
-        } else {
-            self.push(ChatRole::Info, "ok, I won't ask here again. `/scan` runs whenever you want.");
+        match choice {
+            Offer::Grill => self.start_grill(),
+            Offer::Scan => self.start_scan(false),
+            Offer::No => self.push(
+                ChatRole::Info,
+                "ok, I won't ask here again. `/scan` and `/grill` run whenever you want.",
+            ),
         }
+    }
+
+    /// Hands the interview to the master as a normal turn. The script goes in
+    /// as the request but never onto the screen: what the user should see is
+    /// the master's first question, not the briefing behind it.
+    fn start_grill(&mut self) {
+        if self.rx.is_some() {
+            self.push(ChatRole::Info, "the master is busy — wait for this turn to finish.");
+            return;
+        }
+        let facts = scan::collect(&PathBuf::from(&self.repo), &self.home);
+        self.push(ChatRole::Info, "interview: the master asks, you answer. Ctrl-C drops out.");
+        self.spawn_turn(grill::prompt(&facts));
     }
 
     /// Runs the scan off-thread — it's a model call, and the UI shouldn't
@@ -986,6 +1034,7 @@ impl App {
                 let force = parts.next() == Some("--force");
                 self.start_scan(force);
             }
+            "/grill" => self.start_grill(),
             "/model" => match parts.next() {
                 None => self.mode = Mode::ModelInput { input: String::new() },
                 Some(name) => {
@@ -1158,6 +1207,23 @@ const COMMAND_CATALOG: &[CommandDoc] = &[
              once per directory, the first time you open rege in it.",
         ],
         examples: &["/scan", "/scan --force"],
+    },
+    CommandDoc {
+        cmd: "/grill",
+        hint: "the master interviews you, then writes the docs",
+        body: &[
+            "The master asks about the project one question at a time — what you \
+             are building, what is already decided and why, what agents must not \
+             touch — and pushes back when an answer is vague.",
+            "It is the counterpart to /scan, not a variation: a scan reads what \
+             the code already says, an interview reaches what the code cannot \
+             say. On a fresh `rails new` there is nothing to scan and everything \
+             to ask.",
+            "At the end it writes the AGENTS.md, one docs/adr/NNN-*.md per \
+             decision that came up, and docs/glossary.md when the vocabulary is \
+             worth pinning down.",
+        ],
+        examples: &["/grill"],
     },
     CommandDoc {
         cmd: "/buddy",
@@ -1583,15 +1649,18 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                         // Read-only: any key dismisses, like a "press any key" panel.
                         Mode::InfoPanel { .. } => app.mode = Mode::Normal,
                         Mode::ScanOffer { cursor } => match key.code {
-                            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char('y') => {
-                                app.answer_scan_offer(true)
+                            KeyCode::Char('g') | KeyCode::Char('G') => {
+                                app.answer_scan_offer(Offer::Grill)
+                            }
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                app.answer_scan_offer(Offer::Scan)
                             }
                             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                                app.answer_scan_offer(false)
+                                app.answer_scan_offer(Offer::No)
                             }
                             KeyCode::Up => app.scan_offer_move(-1),
                             KeyCode::Down => app.scan_offer_move(1),
-                            KeyCode::Enter => app.answer_scan_offer(cursor == 0),
+                            KeyCode::Enter => app.answer_scan_offer(Offer::from_cursor(cursor)),
                             _ => {}
                         },
                         Mode::AgentsAdd { .. } => match key.code {
@@ -2629,7 +2698,7 @@ fn draw_info_panel(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, tit
 /// scrollback and users typed straight past it.
 fn draw_scan_offer(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cursor: usize) {
     let theme = app.active_theme();
-    let rect = centered_rect(62, 10, area);
+    let rect = centered_rect(66, 11, area);
 
     // Clear the popup area so the background chat text doesn't bleed through.
     // `Paragraph::new("")` does NOT do this — it draws nothing and leaves the
@@ -2642,15 +2711,16 @@ fn draw_scan_offer(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, cur
 
     let lines = vec![
         Line::from(
-            styled(theme, Role::Text, format!("Scan {}?", repo_name(app))).add_modifier(Modifier::BOLD),
+            styled(theme, Role::Text, format!("Get to know {}?", repo_name(app))).add_modifier(Modifier::BOLD),
         ),
         Line::from(styled(theme, Role::Dim, app.repo.clone())),
-        Line::from(styled(theme, Role::Dim, format!("I write an {} describing the directory.", scan::CONTEXT_FILE))),
+        Line::from(styled(theme, Role::Dim, format!("Both routes end in an {}.", scan::CONTEXT_FILE))),
         Line::from(""),
-        agents_line(theme, cursor == 0, "yes, scan it"),
-        agents_line(theme, cursor == 1, "no, and don't ask here again"),
+        agents_line(theme, cursor == 0, "interview me about it (/grill)"),
+        agents_line(theme, cursor == 1, "just scan the files (/scan)"),
+        agents_line(theme, cursor == 2, "no, and don't ask here again"),
         Line::from(""),
-        Line::from(styled(theme, Role::Dim, "↑↓ move · Enter confirms · y/n answers directly")),
+        Line::from(styled(theme, Role::Dim, "↑↓ move · Enter confirms · g/s/n answers directly")),
     ];
     Paragraph::new(lines).render(inner, buf);
 }
@@ -3064,6 +3134,42 @@ mod tests {
     }
 
     #[test]
+    fn grill_hands_the_interview_to_the_master_without_showing_the_script() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.dispatch("/grill");
+
+        // A turn is in flight: the master was asked, not a worker.
+        assert!(app.rx.is_some(), "the interview goes to the master as a turn");
+        // The briefing is machinery. What belongs on screen is the master's
+        // first question, and the script would bury it.
+        let shown: String = app.chat.iter().map(|m| m.text.clone()).collect::<Vec<_>>().join("\n");
+        assert!(!shown.contains("One question at a time"), "the script leaked onto the screen: {shown}");
+        assert!(shown.contains("interview"), "the user is told what is starting: {shown}");
+    }
+
+    #[test]
+    fn grill_waits_instead_of_talking_over_a_running_turn() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        let (_tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        app.dispatch("/grill");
+        assert!(app.chat.iter().any(|m| m.text.contains("busy")), "says why nothing happened");
+    }
+
+    #[test]
+    fn the_offer_records_which_route_was_taken() {
+        // "grill" and "yes" both mean answered, but a later version should be
+        // able to tell an interviewed directory from a scanned one.
+        assert_eq!(Offer::from_cursor(0).recorded(), "grill");
+        assert_eq!(Offer::from_cursor(1).recorded(), "yes");
+        assert_eq!(Offer::from_cursor(2).recorded(), "no");
+        // Out of range is a no, never an accidental model call.
+        assert_eq!(Offer::from_cursor(9), Offer::No);
+    }
+
+    #[test]
     fn theme_picker_opens_navigates_and_confirms() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
@@ -3325,8 +3431,8 @@ mod tests {
         app2.scanned_path = d.join("s.yml");
         app2.offer_scan_if_first_run();
         let painted2 = render_to_lines(&mut app2, 80, 24);
-        let row = painted2.iter().find(|l| l.contains("yes, scan it")).expect("the overlay row");
-        assert!(!row.contains("agentes"), "agents panel bleeding through: {row}");
+        let row = painted2.iter().find(|l| l.contains("interview me")).expect("the overlay row");
+        assert!(!row.contains("agents"), "agents panel bleeding through: {row}");
         assert!(!row.contains('─'), "another panel border bleeding through: {row}");
     }
 
@@ -3597,15 +3703,16 @@ mod tests {
         // line it read as scrollback and got typed straight past.
         assert!(!app.chat.iter().any(|m| m.text.contains(scan::CONTEXT_FILE)), "the question does not reach the log");
         let painted = render_to_lines(&mut app, 100, 40);
-        assert!(painted.iter().any(|l| l.contains("Scan ")), "overlay pergunta: {painted:?}");
+        assert!(painted.iter().any(|l| l.contains("Get to know")), "the overlay asks: {painted:?}");
         assert!(painted.iter().any(|l| l.contains(scan::CONTEXT_FILE)));
-        assert!(painted.iter().any(|l| l.contains("yes, scan it")));
+        assert!(painted.iter().any(|l| l.contains("interview me")), "the interview is offered first");
+        assert!(painted.iter().any(|l| l.contains("just scan the files")));
 
-        app.answer_scan_offer(false);
+        app.answer_scan_offer(Offer::No);
         assert!(matches!(app.mode, Mode::Normal));
         assert!(app.scan_rx.is_none(), "no scan should have been fired");
 
-        // Segunda abertura no mesmo diretório: silêncio.
+        // Opening the same directory again: silence.
         let mut app2 = App::new(&config, dir.to_str().unwrap());
         app2.scanned_path = dir.join("state/scanned.yml");
         app2.offer_scan_if_first_run();

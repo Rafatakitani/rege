@@ -175,20 +175,10 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The one-shot request handed to the master. Facts go in as a digest so the
-/// model spends its budget on judgement, not on `ls`.
-pub fn prompt(f: &Facts) -> String {
-    let mut s = String::new();
-    s.push_str("Write the contents of an AGENTS.md file for the directory below.\n");
-    s.push_str("It is a short document guiding AI agents that will work here.\n\n");
-    if f.is_home {
-        s.push_str(
-            "WARNING: this directory is the user's HOME, not a project. \
-             Describe it as a personal workspace — what lives here and how to get around. \
-             Do not pretend it is a monorepo and do not describe software architecture.\n\n",
-        );
-    }
-    s.push_str(&format!("directory: {}\n", f.dir.display()));
+/// The collected facts as flat text. Shared by every prompt that needs to tell
+/// a model what is in this directory, so none of them has to walk the tree.
+pub fn digest(f: &Facts) -> String {
+    let mut s = format!("directory: {}\n", f.dir.display());
     match (&f.branch, &f.remote) {
         (Some(b), Some(r)) => s.push_str(&format!("git: branch {b}, remote {r}\n")),
         (Some(b), None) => s.push_str(&format!("git: branch {b}, no remote\n")),
@@ -213,6 +203,23 @@ pub fn prompt(f: &Facts) -> String {
     if let Some(r) = &f.readme {
         s.push_str(&format!("\nREADME (beginning):\n{r}\n"));
     }
+    s
+}
+
+/// The one-shot request handed to the master. Facts go in as a digest so the
+/// model spends its budget on judgement, not on `ls`.
+pub fn prompt(f: &Facts) -> String {
+    let mut s = String::new();
+    s.push_str("Write the contents of an AGENTS.md file for the directory below.\n");
+    s.push_str("It is a short document guiding AI agents that will work here.\n\n");
+    if f.is_home {
+        s.push_str(
+            "WARNING: this directory is the user's HOME, not a project. \
+             Describe it as a personal workspace — what lives here and how to get around. \
+             Do not pretend it is a monorepo and do not describe software architecture.\n\n",
+        );
+    }
+    s.push_str(&digest(f));
     s.push_str(
         "\nIf an AGENTS.md already exists in this directory, ignore it: you are writing \
          the new version from scratch. Do not ask anything, do not offer options, do not \

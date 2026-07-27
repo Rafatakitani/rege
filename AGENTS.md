@@ -109,5 +109,12 @@ Quando você é o **mestre**, tem estas ferramentas (via MCP):
   ele. Coleta determinística e limitada (`MAX_FILES`/`MAX_DEPTH`) + uma chamada ao
   mestre com o digest pronto. A resposta fica em `~/.config/rege/scanned.yml`, nunca no
   projeto do usuário; nunca sobrescreve um `AGENTS.md` existente sem `--force`.
+- **`grill`**: o contraponto do `scan`. O `scan` lê o que o código diz; o `grill` alcança
+  o que o código não pode dizer (o que se quer construir, o porquê das decisões, o que não
+  tocar), e por isso é o **mestre** que entrevista — uma pergunta por vez, na conversa que
+  já existe. O rege só entrega o roteiro e os fatos já coletados; a resposta ao overlay
+  fica gravada como `grill` (distinta de `yes`) pra dar pra saber depois qual caminho o
+  diretório tomou. Não injete o roteiro no chat: o que o usuário tem que ver é a primeira
+  pergunta, não o briefing.
 - Desenho completo: `docs/superpowers/specs/2026-07-23-rege-design.md`.
 - Preserve a atribuição MIT do `/buddy` (port de ramarivera/claude-buddy) no topo de `src/buddy.rs`.
