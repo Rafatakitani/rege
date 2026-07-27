@@ -1960,10 +1960,16 @@ const BANNER: [&str; 5] = [
 /// Width the conversation text may use. The buddy sits in the bottom-right
 /// corner and is painted *after* the messages, so without reserving its column
 /// the text ran under it and came out clipped mid-word.
+/// Reading width for the chat. On a wide terminal the text used to run the
+/// full 200+ columns, which turns a `/grill` transcript into a wall — the eye
+/// loses the line on the way back. Cap it at a column count that reads like
+/// prose and let the rest of the pane stay empty.
+const CHAT_MAX_WIDTH: u16 = 100;
+
 fn chat_text_width(area: Rect, app: &App) -> u16 {
     let margins = 4;
     let reserved = if app.buddy.is_some() { BUDDY_WIDTH + 2 } else { 0 };
-    area.width.saturating_sub(margins + reserved)
+    area.width.saturating_sub(margins + reserved).min(CHAT_MAX_WIDTH)
 }
 
 /// Visible rows and total wrapped rows of the chat pane, mirroring how
@@ -2142,7 +2148,11 @@ fn user_row_colors(theme: &str) -> ((u8, u8, u8), (u8, u8, u8)) {
 
 fn chat_lines(theme: &str, m: &ChatMsg, width: u16) -> Vec<Line<'static>> {
     if matches!(m.role, ChatRole::User) {
-        return user_lines(theme, &m.text, width);
+        // A blank row above the band: back-to-back turns ran together, and the
+        // band is what the eye scans for when looking for "where did I ask this".
+        let mut lines = vec![Line::default()];
+        lines.extend(user_lines(theme, &m.text, width));
+        return lines;
     }
     let (prefix, prefix_role, body_role) = match m.role {
         ChatRole::User => unreachable!("tratado acima"),
@@ -2979,6 +2989,26 @@ mod tests {
         assert_eq!(wrap_text("", 5), vec![String::new()]);
         // Zero width is clamped to 1, never panics or loops forever.
         assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    /// Wide terminals get a reading column, not a 200-char wall.
+    #[test]
+    fn chat_text_width_is_capped_on_wide_terminals() {
+        let config = Config::default();
+        let app = App::new(&config, "/tmp/repo");
+        let narrow = Rect { x: 0, y: 0, width: 80, height: 20 };
+        assert_eq!(chat_text_width(narrow, &app), 76, "narrow terminals keep the margins only");
+        let wide = Rect { x: 0, y: 0, width: 213, height: 48 };
+        assert_eq!(chat_text_width(wide, &app), CHAT_MAX_WIDTH);
+    }
+
+    #[test]
+    fn user_message_gets_a_blank_row_above_its_band() {
+        let m = ChatMsg { role: ChatRole::User, text: "oi".into() };
+        let lines = chat_lines("hacker", &m, 40);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans.len(), 0, "separator row is empty");
     }
 
     #[test]
