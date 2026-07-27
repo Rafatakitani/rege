@@ -9,6 +9,7 @@ use crate::driver;
 use crate::grill;
 use crate::playbook;
 use crate::scan;
+use crate::skills;
 use crate::sessions::{self, SessionRec};
 use crate::stream;
 use crate::theme::{self, Role};
@@ -29,7 +30,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::io::Stdout;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -232,6 +233,9 @@ struct App {
     /// Screen row where the chat pane starts, so a drag knows when it has hit
     /// the top edge and should scroll instead of stopping.
     chat_top: u16,
+    /// The user's own Claude Code skills and commands, by name. Discovered once
+    /// at startup: they change when someone edits `~/.claude`, not mid-session.
+    skills: Vec<String>,
     /// When the running turn started, for the activity line. `None` = idle.
     turn_started: Option<Instant>,
     /// Characters streamed back this turn, the basis for the token estimate.
@@ -292,6 +296,7 @@ impl App {
             chat_rows: 0,
             chat_total: 0,
             chat_top: 0,
+            skills: skills::discover(&crate::dirs_home(), Path::new(repo)),
             turn_started: None,
             turn_chars: 0,
             spinner: 0,
@@ -693,7 +698,7 @@ impl App {
     /// Slash-command matches for the autocomplete popup: non-empty only while
     /// the input is a bare `/prefix` (leading `/`, no space yet). Empty means
     /// the popup is closed.
-    fn command_menu(&self) -> Vec<&'static CommandDoc> {
+    fn command_menu(&self) -> Vec<MenuRow> {
         // Recalling `/help` from history shouldn't reopen the popup — ↑↓ have
         // to keep meaning "walk the history" until the user types again.
         if self.history_idx.is_some() {
@@ -703,7 +708,19 @@ impl App {
         if !inp.starts_with('/') || inp.chars().any(char::is_whitespace) {
             return Vec::new();
         }
-        COMMAND_CATALOG.iter().filter(|d| d.cmd.starts_with(inp)).collect()
+        let mine = COMMAND_CATALOG
+            .iter()
+            .filter(|d| d.cmd.starts_with(inp))
+            .map(|d| MenuRow { cmd: d.cmd.to_string(), hint: d.hint.to_string() });
+        // The user's own skills come after rege's commands: they are the longer
+        // tail, and they run somewhere else (the master), which the hint says.
+        let theirs = self
+            .skills
+            .iter()
+            .map(|n| format!("/{n}"))
+            .filter(|c| c.starts_with(inp))
+            .map(|cmd| MenuRow { cmd, hint: "your skill · runs on the master".to_string() });
+        mine.chain(theirs).collect()
     }
 
     fn menu_open(&self) -> bool {
@@ -729,8 +746,8 @@ impl App {
     /// is closed, so Tab stays inert during normal typing.
     fn menu_complete(&mut self) {
         let menu = self.command_menu();
-        if let Some(doc) = menu.get(self.menu_selected(menu.len())) {
-            self.input = doc.cmd.to_string();
+        if let Some(row) = menu.get(self.menu_selected(menu.len())) {
+            self.input = row.cmd.clone();
             self.input_cursor = self.input.chars().count();
             self.menu_cursor = 0;
         }
@@ -809,6 +826,21 @@ impl App {
         self.history_push(&line);
         if line.starts_with('/') && is_known_command(&line) {
             self.dispatch(&line);
+            return;
+        }
+        // Not one of rege's, but one of the user's own Claude Code skills: the
+        // master is `claude` and runs it verbatim. Forwarding only known names
+        // keeps a typo a cheap error instead of a paid turn.
+        if line.starts_with('/') && skills::matches(&self.skills, &line) {
+            if self.master_cli != "claude" {
+                self.push(
+                    ChatRole::Error,
+                    format!("{} can't run Claude Code skills — /model or master.cli", self.master_cli),
+                );
+                return;
+            }
+            self.push(ChatRole::User, line.clone());
+            self.spawn_turn(line);
             return;
         }
         if line.starts_with('/') {
@@ -1104,7 +1136,15 @@ impl App {
 }
 
 const KNOWN_COMMANDS: &[&str] =
-    &["/quit", "/q", "/help", "/?", "/model", "/config", "/theme", "/resume", "/agents", "/buddy", "/scan"];
+    &["/quit", "/q", "/help", "/?", "/model", "/config", "/theme", "/resume", "/agents", "/buddy", "/scan", "/grill"];
+
+/// One row of the autocomplete popup. rege's own commands and the user's
+/// Claude Code skills share the list — from the input line they are the same
+/// gesture, and which side runs it is rege's problem, not the typist's.
+struct MenuRow {
+    cmd: String,
+    hint: String,
+}
 
 /// A command as documentation, not just a label. `/help` teaches from `body`:
 /// what the command does, and where it sits in how rege works — a one-line hint
@@ -1126,6 +1166,9 @@ const COMMAND_CATALOG: &[CommandDoc] = &[
         body: &[
             "This screen. ↑↓ walks the commands and explains each one down here; \
              Enter runs whatever is highlighted.",
+            "Your own Claude Code skills and commands (~/.claude/skills, \
+             .claude/commands) work here too: they show up in the / autocomplete \
+             and run on the master, which is `claude`.",
             "New to rege? You talk to the MASTER. It doesn't write code — it sizes \
              the task up and delegates to workers, each in its own isolated git \
              worktree. Then it reviews the work and opens a PR.",
@@ -2783,7 +2826,7 @@ fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: R
     let height = menu.len() as u16 + 2; // borders
     // Sit directly above the input; clamp so it never overflows the top edge.
     let y = input_rect.y.saturating_sub(height);
-    let width = input_rect.width.min(60).max(24);
+    let width = input_rect.width.min(66).max(24);
     let rect = Rect { x: input_rect.x, y, width, height };
 
     Clear.render(rect, buf); // real clear: an empty Paragraph leaves cells intact
@@ -2795,15 +2838,15 @@ fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: R
     let lines: Vec<Line> = menu
         .iter()
         .enumerate()
-        .map(|(i, doc)| {
-            let (cmd, desc) = (doc.cmd, doc.hint);
+        .map(|(i, row)| {
+            let (cmd, desc) = (row.cmd.as_str(), row.hint.as_str());
             let selected = i == cursor;
             let chevron =
                 if selected { styled(theme, Role::Accent, "❯ ") } else { styled(theme, Role::Dim, "  ") };
             let name = if selected {
-                styled(theme, Role::Accent, format!("{cmd:<10}")).add_modifier(Modifier::BOLD)
+                styled(theme, Role::Accent, format!("{cmd:<14}")).add_modifier(Modifier::BOLD)
             } else {
-                styled(theme, Role::Text, format!("{cmd:<10}"))
+                styled(theme, Role::Text, format!("{cmd:<14}"))
             };
             Line::from(vec![chevron, name, styled(theme, Role::Dim, format!(" {desc}"))])
         })
@@ -3143,6 +3186,80 @@ mod tests {
     }
 
     #[test]
+    fn a_user_skill_goes_to_the_master_instead_of_erroring() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.skills = vec!["explain".to_string()];
+
+        app.set_input("/explain what a worktree is".to_string());
+        app.submit();
+
+        // It reaches the master verbatim — `claude -p "/explain x"` runs the
+        // skill, so rege's job is to get out of the way, arguments included.
+        assert!(app.rx.is_some(), "the turn was sent");
+        assert!(
+            app.chat.iter().any(|m| matches!(m.role, ChatRole::User) && m.text == "/explain what a worktree is"),
+            "the line shows as the user's: {:?}",
+            app.chat.iter().map(|m| m.text.clone()).collect::<Vec<_>>()
+        );
+        assert!(!app.chat.iter().any(|m| m.text.contains("unknown command")), "no longer a lie");
+    }
+
+    #[test]
+    fn a_typo_stays_a_cheap_error() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.skills = vec!["explain".to_string()];
+        app.set_input("/explainn".to_string());
+        app.submit();
+        assert!(app.rx.is_none(), "a typo must not buy a turn");
+        assert!(app.chat.iter().any(|m| m.text.contains("unknown command")));
+    }
+
+    #[test]
+    fn user_skills_show_up_in_the_autocomplete() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.skills = vec!["explain".to_string()];
+        app.input = "/ex".into();
+        let menu = app.command_menu();
+        assert_eq!(menu.len(), 1, "{menu:?}", menu = menu.iter().map(|r| &r.cmd).collect::<Vec<_>>());
+        assert_eq!(menu[0].cmd, "/explain");
+        assert!(menu[0].hint.contains("master"), "the hint says where it runs: {}", menu[0].hint);
+    }
+
+    #[test]
+    fn a_non_claude_master_says_why_the_skill_cannot_run() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.skills = vec!["explain".to_string()];
+        app.master_cli = "codex".to_string();
+        app.set_input("/explain x".to_string());
+        app.submit();
+        assert!(app.rx.is_none(), "no turn spent on a master that can't run it");
+        assert!(
+            app.chat.iter().any(|m| m.text.contains("codex")),
+            "names the master: {:?}",
+            app.chat.iter().map(|m| m.text.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn grill_typed_into_the_input_reaches_its_command() {
+        // `/grill` was missing from KNOWN_COMMANDS, so typing it hit the
+        // unknown-command path while /help happily advertised it.
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.set_input("/grill".to_string());
+        app.submit();
+        assert!(
+            !app.chat.iter().any(|m| m.text.contains("unknown command")),
+            "{:?}",
+            app.chat.iter().map(|m| m.text.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn grill_hands_the_interview_to_the_master_without_showing_the_script() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
@@ -3351,6 +3468,9 @@ mod tests {
     fn command_menu_filters_by_prefix_and_closes_on_space() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
+        // Whatever skills the machine running the tests happens to have are not
+        // part of this assertion.
+        app.skills.clear();
         // Bare slash lists everything.
         app.input = "/".into();
         assert_eq!(app.command_menu().len(), COMMAND_CATALOG.len());
@@ -3390,7 +3510,7 @@ mod tests {
         // Enter must take that row, not the lone slash under the caret.
         app.input = "/".into();
         app.menu_move(2);
-        let expected = app.command_menu()[2].cmd;
+        let expected = app.command_menu()[2].cmd.clone();
         assert!(app.menu_accept());
         assert_eq!(app.input, expected);
     }

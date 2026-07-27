@@ -127,6 +127,11 @@ When you are the **master**, you have these tools (over MCP):
   (`MAX_FILES`/`MAX_DEPTH`) + one call to the master with the digest ready. The answer
   lives in `~/.config/rege/scanned.yml`, never in the user's project; it never overwrites
   an existing `AGENTS.md` without `--force`.
+- **`skills`**: the user's own Claude Code skills/commands are discovered by name at
+  startup (`~/.claude/skills`, `~/.claude/commands`, and the project's `.claude/`) and
+  forwarded to the master verbatim, arguments included — `claude -p "/explain x"` runs
+  the skill. Only known names are forwarded: blind forwarding would turn every typo into
+  a paid turn. Names only; rege never reads a skill body.
 - **`grill`**: the counterpart to `scan`. A scan reads what the code says; the interview
   reaches what the code cannot say (what is being built, why decisions were made, what
   not to touch), which is why the **master** conducts it — one question at a time, in the
