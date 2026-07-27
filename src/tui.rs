@@ -1776,15 +1776,20 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
     let theme = app.active_theme().to_string();
     let theme = theme.as_str();
     let input_height = input_area_height(&app.input, area.width);
+    // The activity line sits directly above the input, where the eye already is
+    // while waiting — under the input it read as part of the status bar and got
+    // missed. It only claims a row while a turn is actually in flight.
+    let activity_height = u16::from(app.turn_started.is_some());
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(6),
+        Constraint::Length(activity_height),
         Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .split(area);
-    app.input_rect = chunks[3];
+    app.input_rect = chunks[4];
 
     draw_header(chunks[0], buf, app, theme);
     // Measure the chat before painting it: the wheel and PageUp/Down need the
@@ -1795,8 +1800,11 @@ fn draw(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &mut App) {
     app.chat_top = chunks[1].y;
     draw_chat(chunks[1], buf, app, theme);
     draw_agents(chunks[2], buf, app, theme);
-    draw_input(chunks[3], buf, app, theme);
-    draw_statusbar(chunks[4], buf, app, theme);
+    if activity_height > 0 {
+        draw_activity(chunks[3], buf, app, theme);
+    }
+    draw_input(chunks[4], buf, app, theme);
+    draw_statusbar(chunks[5], buf, app, theme);
 
     if let Mode::ThemePicker { cursor } = app.mode {
         draw_theme_picker(area, buf, app, cursor);
@@ -2411,6 +2419,19 @@ fn fmt_tokens(chars: usize) -> String {
     }
 }
 
+/// The one row that says a turn is alive. Without it the UI looks frozen
+/// between the send and the first streamed token, which can be many seconds.
+fn draw_activity(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
+    let Some(started) = app.turn_started else { return };
+    let elapsed = started.elapsed();
+    let line = Line::from(vec![
+        styled(theme, Role::Accent, format!("{} ", spinner_frame(app.spinner))),
+        styled(theme, Role::Text, activity_word(elapsed.as_secs())),
+        styled(theme, Role::Dim, format!("… ({} · ↓ {})", fmt_elapsed(elapsed), fmt_tokens(app.turn_chars))),
+    ]);
+    Paragraph::new(line).render(area, buf);
+}
+
 fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     if let Some((msg, ts)) = &app.flash {
         if ts.elapsed() < Duration::from_secs(2) {
@@ -2418,18 +2439,6 @@ fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, them
             Paragraph::new(line).render(area, buf);
             return;
         }
-    }
-    // A turn in flight takes over the bar: without it the UI looks frozen
-    // between the send and the first streamed token, which can be many seconds.
-    if let Some(started) = app.turn_started {
-        let elapsed = started.elapsed();
-        let line = Line::from(vec![
-            styled(theme, Role::Accent, format!("{} ", spinner_frame(app.spinner))),
-            styled(theme, Role::Text, activity_word(elapsed.as_secs())),
-            styled(theme, Role::Dim, format!("… ({} · ↓ {})", fmt_elapsed(elapsed), fmt_tokens(app.turn_chars))),
-        ]);
-        Paragraph::new(line).render(area, buf);
-        return;
     }
     let running = app.agents.iter().filter(|a| a.state == AgentState::Running).count();
     let ready = app.agents.iter().filter(|a| a.state == AgentState::Done).count();
@@ -3510,22 +3519,30 @@ mod tests {
     }
 
     #[test]
-    fn running_turn_shows_an_activity_line() {
+    fn running_turn_shows_an_activity_line_above_the_input() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
-        // The status bar is the last row; the welcome message also mentions
-        // /help, so look at the bar itself rather than the whole screen.
-        let barra = |app: &mut App| render_to_lines(app, 90, 24).last().cloned().unwrap_or_default();
-        let ocioso = barra(&mut app);
-        assert!(ocioso.contains("/help"), "parado: barra normal");
+        let bar = |app: &mut App| render_to_lines(app, 90, 24).last().cloned().unwrap_or_default();
+        assert!(bar(&mut app).contains("/help"), "idle: the normal bar");
 
         app.turn_started = Some(Instant::now());
         app.turn_chars = 34_000;
-        let rodando = barra(&mut app);
-        assert!(rodando.contains("8.5k tokens"), "token estimate: {rodando}");
-        assert!(rodando.contains("0s"), "tempo decorrido");
-        assert!(ACTIVITY_WORDS.iter().any(|w| rodando.contains(w)), "activity word: {rodando}");
-        assert!(!rodando.contains("/help"), "a barra normal dá lugar à de atividade");
+        let painted = render_to_lines(&mut app, 90, 24);
+
+        let at = painted
+            .iter()
+            .position(|l| ACTIVITY_WORDS.iter().any(|w| l.contains(w)) && l.contains("tokens"))
+            .expect(&format!("no activity line: {painted:?}"));
+        assert!(painted[at].contains("8.5k tokens"), "token estimate: {}", painted[at]);
+        assert!(painted[at].contains("0s"), "elapsed time");
+
+        // Above the input, where the eye already is while waiting. Under it the
+        // line read as part of the status bar and got missed.
+        let input = painted.iter().position(|l| l.contains('❯')).expect("input row");
+        assert!(at < input, "activity at {at}, input at {input}: {painted:?}");
+
+        // And the status bar keeps its own job instead of being taken over.
+        assert!(painted.last().unwrap().contains("/help"), "the bar stays: {painted:?}");
     }
 
     #[test]
