@@ -10,7 +10,7 @@ pub enum Event {
     Text(String),
     Tool { name: String, input: String },
     ToolResult(String),
-    Done { cost: Option<f64> },
+    Done,
 }
 
 /// Maps one parsed stream-json line to zero or more Events (an "assistant"
@@ -29,10 +29,7 @@ pub fn parse_line(json: &Value) -> Vec<Event> {
         }
         Some("assistant") => blocks(json.pointer("/message/content")),
         Some("user") => tool_results(json.pointer("/message/content")),
-        Some("result") => {
-            let cost = json.get("total_cost_usd").and_then(Value::as_f64);
-            vec![Event::Done { cost }]
-        }
+        Some("result") => vec![Event::Done],
         _ => vec![],
     }
 }
@@ -154,15 +151,15 @@ mod tests {
     }
 
     #[test]
-    fn result_yields_done_with_cost() {
+    fn result_yields_done() {
         let line = r#"{"type":"result","subtype":"success","total_cost_usd":0.0234,"session_id":"sess-123","result":"done"}"#;
-        assert_eq!(parse(line), vec![Event::Done { cost: Some(0.0234) }]);
+        assert_eq!(parse(line), vec![Event::Done]);
     }
 
     #[test]
-    fn result_without_cost_yields_done_none() {
+    fn result_error_also_yields_done() {
         let line = r#"{"type":"result","subtype":"error"}"#;
-        assert_eq!(parse(line), vec![Event::Done { cost: None }]);
+        assert_eq!(parse(line), vec![Event::Done]);
     }
 
     #[test]
