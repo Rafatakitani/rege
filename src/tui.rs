@@ -970,12 +970,8 @@ impl App {
             // carry no signal here — the worker already acted on them. Collapse
             // to a marker; the running-line above shows what ran.
             stream::Event::ToolResult(_) => self.push(ChatRole::Info, "ran command".to_string()),
-            stream::Event::Done { cost } => {
-                let line = match cost {
-                    Some(c) => format!("— ${c:.4}"),
-                    None => "— concluído".to_string(),
-                };
-                self.push(ChatRole::Info, line);
+            stream::Event::Done => {
+                self.push(ChatRole::Info, "— concluído".to_string());
                 self.rx = None;
                 self.turn_started = None;
             }
@@ -2298,7 +2294,7 @@ fn fmt_elapsed(d: Duration) -> String {
 
 /// Rough token count from characters — the stream doesn't carry usage per
 /// chunk, and ~4 chars/token is the usual approximation. It's a progress
-/// indicator, not accounting; the real cost lands in the `Done` line.
+/// indicator, not accounting.
 fn fmt_tokens(chars: usize) -> String {
     let tokens = chars / 4;
     if tokens >= 1000 {
@@ -2995,14 +2991,14 @@ mod tests {
     }
 
     #[test]
-    fn handle_stream_event_done_closes_rx_and_shows_cost() {
+    fn handle_stream_event_done_closes_rx_and_marks_end() {
         let config = Config::default();
         let mut app = App::new(&config, "/tmp/repo");
         let (_tx, rx) = mpsc::channel();
         app.rx = Some(rx);
-        app.handle_stream_event(stream::Event::Done { cost: Some(0.01) });
+        app.handle_stream_event(stream::Event::Done);
         assert!(app.rx.is_none());
-        assert!(app.chat.iter().any(|m| m.text.contains("0.0100")));
+        assert!(app.chat.iter().any(|m| m.text.contains("concluído")));
     }
 
     #[test]
@@ -3394,7 +3390,7 @@ mod tests {
         app.handle_stream_event(stream::Event::Text("abcd".into()));
         assert_eq!(app.turn_chars, 4, "conta o que veio pra estimar tokens");
 
-        app.handle_stream_event(stream::Event::Done { cost: Some(0.01) });
+        app.handle_stream_event(stream::Event::Done);
         assert!(app.turn_started.is_none(), "terminou: some a linha de atividade");
     }
 
