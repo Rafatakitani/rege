@@ -2817,6 +2817,10 @@ fn draw_agents_add(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
 
 /// Slash-command autocomplete popup, anchored just above the input box. Draws
 /// nothing when the menu is closed (input isn't a bare `/prefix`).
+/// Rows the command popup shows at once. A full skill roster is 40+ entries;
+/// covering the whole chat with them is worse than scrolling a short window.
+const MENU_MAX_ROWS: usize = 10;
+
 fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: Rect) {
     let menu = app.command_menu();
     if menu.is_empty() || input_rect.width == 0 {
@@ -2830,7 +2834,7 @@ fn draw_command_menu(buf: &mut ratatui::buffer::Buffer, app: &App, input_rect: R
     if max_rows == 0 {
         return;
     }
-    let visible = menu.len().min(max_rows as usize);
+    let visible = menu.len().min(max_rows as usize).min(MENU_MAX_ROWS);
     let height = visible as u16 + 2; // borders
     let y = input_rect.y - height;
     let width = input_rect.width.min(66).max(24);
@@ -3492,14 +3496,20 @@ mod tests {
         app.skills = (0..200).map(|i| format!("skill{i}")).collect();
         app.input = "/".into();
         app.menu_cursor = 150; // scrolled deep into the list
+        let total = app.command_menu().len();
+        let highlighted = app.command_menu()[150].cmd.clone();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test backend");
         terminal
             .draw(|f| {
                 draw(f.area(), f.buffer_mut(), &mut app);
                 let rows = capture_row_text(f.buffer_mut());
-                // The highlighted row is on screen, and nothing panicked.
-                assert!(rows.iter().any(|r| r.contains("/skill")), "popup rendered");
-                assert!(rows.iter().any(|r| r.contains("commands ")), "count in the title");
+                // Nothing panicked, the highlighted row is on screen, and the
+                // popup never grows past its cap however long the menu is.
+                assert!(rows.iter().any(|r| r.contains(&highlighted)), "highlighted row visible");
+                let title = format!("commands 151/{total}");
+                assert!(rows.iter().any(|r| r.contains(&title)), "position in title");
+                let shown = rows.iter().filter(|r| r.contains("/skill")).count();
+                assert_eq!(shown, MENU_MAX_ROWS, "capped at MENU_MAX_ROWS rows");
             })
             .expect("draw");
     }
