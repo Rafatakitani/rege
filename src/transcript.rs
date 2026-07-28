@@ -18,10 +18,52 @@ pub struct Turn {
     pub text: String,
 }
 
-/// Claude's directory naming: the absolute path with `/` and `.` flattened to
-/// `-`, so `/home/u/proj/.claude` becomes `-home-u-proj--claude`.
+/// Beyond this the slug is cut and a hash of the full path is appended, so two
+/// long paths sharing a prefix still land in different directories. Claude's
+/// own limit; ours has to be the same number or the path misses.
+const MAX_SLUG: usize = 200;
+
+/// Claude's directory naming: **every** character outside `[a-zA-Z0-9]` becomes
+/// `-`, so `/home/u/proj/.claude` becomes `-home-u-proj--claude` and
+/// `/home/u/invasão-alien` becomes `-home-u-invas-o-alien`. Flattening only `/`
+/// and `.` was enough for ASCII paths and silently missed every accented one —
+/// the file was there, we were looking one directory over.
+///
+/// It runs over UTF-16 code units (a JS `replace` without `/u`), so an astral
+/// character like an emoji turns into two dashes, not one.
 pub fn project_slug(repo: &str) -> String {
-    repo.chars().map(|c| if c == '/' || c == '.' { '-' } else { c }).collect()
+    let slug: String = repo
+        .encode_utf16()
+        .map(|u| match u8::try_from(u) {
+            Ok(b) if b.is_ascii_alphanumeric() => b as char,
+            _ => '-',
+        })
+        .collect();
+    if slug.len() <= MAX_SLUG {
+        return slug;
+    }
+    // Every char is ASCII by now, so slicing by byte is slicing by char.
+    format!("{}-{}", &slug[..MAX_SLUG], slug_hash(repo))
+}
+
+/// The `(h << 5) - h + c` string hash, kept in wrapping i32 like the JS `| 0`,
+/// then `Math.abs(...).toString(36)`. `abs` of `i32::MIN` is what pushes this
+/// through `unsigned_abs`: in JS it's `2147483648`, not an overflow.
+fn slug_hash(repo: &str) -> String {
+    let mut h: i32 = 0;
+    for u in repo.encode_utf16() {
+        h = h.wrapping_shl(5).wrapping_sub(h).wrapping_add(i32::from(u));
+    }
+    let mut n = u64::from(h.unsigned_abs());
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(char::from_digit((n % 36) as u32, 36).unwrap());
+        n /= 36;
+    }
+    out.iter().rev().collect()
 }
 
 pub fn transcript_path(home: &Path, repo: &str, session_id: &str) -> PathBuf {
@@ -105,6 +147,34 @@ mod tests {
     }
 
     #[test]
+    fn slug_flattens_accents_like_claude_does() {
+        // Checked against the directory `claude` actually created for this repo:
+        // `~/.claude/projects/-home-rafa-projetos-invas-o-alien-3d`.
+        assert_eq!(
+            project_slug("/home/rafa/projetos/invasão-alien-3d"),
+            "-home-rafa-projetos-invas-o-alien-3d"
+        );
+        // Spaces, underscores, everything outside [a-zA-Z0-9].
+        assert_eq!(project_slug("/home/u/my proj_v2"), "-home-u-my-proj-v2");
+        // Astral characters are two UTF-16 units, so two dashes.
+        assert_eq!(project_slug("/a/🙂"), "-a---");
+    }
+
+    #[test]
+    fn a_very_long_path_is_cut_and_hashed() {
+        let repo = format!("/home/u/{}", "x".repeat(300));
+        let slug = project_slug(&repo);
+        let (head, hash) = slug.rsplit_once('-').unwrap();
+        assert_eq!(head.len(), MAX_SLUG, "cut at claude's limit: {slug}");
+        assert!(hash.chars().all(|c| c.is_ascii_alphanumeric()), "base36 tail: {hash}");
+        // Same prefix, different path — the hash is what keeps them apart.
+        assert_ne!(slug, project_slug(&format!("{repo}y")));
+        // Checked against claude's own `Math.abs(hash).toString(36)`.
+        assert_eq!(hash, "giky6d");
+        assert!(project_slug(&format!("{repo}y")).ends_with("-es91k2"));
+    }
+
+    #[test]
     fn path_lands_where_claude_keeps_the_session() {
         let p = transcript_path(Path::new("/home/u"), "/home/u/proj", "abc-123");
         assert_eq!(p, PathBuf::from("/home/u/.claude/projects/-home-u-proj/abc-123.jsonl"));
@@ -147,3 +217,4 @@ mod tests {
         assert_eq!(read(&f)[0].text, "e agora?");
     }
 }
+
