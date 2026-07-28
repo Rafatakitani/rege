@@ -122,7 +122,11 @@ When you are the **master**, you have these tools (over MCP):
   as before. We don't invent a transcript format: if the source doesn't exist, there is
   nothing to show. The user's request sits after a marker that was `Tarefa:` and is now
   `Task:`; the strip accepts both, or `/resume` on an old session would dump the whole
-  playbook on screen.
+  playbook on screen. The `<slug>` is the repo path with **every** non-alphanumeric
+  character turned into `-` (so `invasão` becomes `invas-o`), cut at 200 characters with
+  a hash of the full path appended — copied from `claude` itself. Flattening only `/` and
+  `.` looked right and missed every accented path: the transcript existed, we read one
+  directory over and replayed nothing.
 - **`scan`**: reads what the code already says. Deterministic, capped collection
   (`MAX_FILES`/`MAX_DEPTH`) + one call to the master with the digest ready. The answer
   lives in `~/.config/rege/scanned.yml`, never in the user's project; it never overwrites
