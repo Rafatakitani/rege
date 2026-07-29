@@ -1485,7 +1485,7 @@ fn tmux_sessions() -> Vec<String> {
 fn agent_row(session: &str, logdir: &PathBuf) -> AgentRow {
     let name = session.strip_prefix("rege-").unwrap_or(session).to_string();
     let log = std::fs::read_to_string(logdir.join(format!("{session}.log"))).unwrap_or_default();
-    let state = if let Some(code) = find_exit_code(&log) {
+    let state = if let Some(code) = crate::tmux::find_exit_code(&log) {
         if code == 0 {
             AgentState::Done
         } else {
@@ -1496,7 +1496,7 @@ fn agent_row(session: &str, logdir: &PathBuf) -> AgentRow {
     } else {
         AgentState::Unknown
     };
-    let last = strip_sentinel(&log).lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("").to_string();
+    let last = last_log_line(&log);
     AgentRow { name, state, last }
 }
 
@@ -1510,21 +1510,60 @@ fn tmux_alive(session: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn find_exit_code(log: &str) -> Option<i32> {
-    let prefix = "__RG_EXIT_";
-    let suffix = "__";
-    let start = log.find(prefix)? + prefix.len();
-    let rest = &log[start..];
-    let end = rest.find(suffix)?;
-    rest[..end].parse().ok()
+/// Last line of a worker log worth showing in the agents pane. The log is a
+/// raw PTY tee, so it carries escape sequences, carriage-return redraws and
+/// the shell's echo of the (very long) launch command. Escape bytes written
+/// into the frame buffer move the real cursor and shred the whole screen, so
+/// nothing here reaches the pane unsanitized.
+fn last_log_line(log: &str) -> String {
+    crate::tmux::strip_sentinel(crate::tmux::strip_launch_echo(log))
+        .lines()
+        .map(sanitize_log_line)
+        .filter(|l| !l.is_empty())
+        .last()
+        .unwrap_or_default()
 }
 
-fn strip_sentinel(log: &str) -> String {
-    let prefix = "__RG_EXIT_";
-    match log.find(prefix) {
-        Some(i) => log[..i].to_string(),
-        None => log.to_string(),
+/// Drops ANSI/OSC escape sequences and control characters, keeps only what a
+/// terminal would have shown, and collapses whitespace to a single line.
+fn sanitize_log_line(line: &str) -> String {
+    // A carriage return rewrites the line: only the final segment is visible.
+    let visible = line.rsplit('\r').next().unwrap_or(line);
+    let mut out = String::with_capacity(visible.len());
+    let mut chars = visible.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            if !c.is_control() {
+                out.push(c);
+            }
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters/intermediates, then a final byte in @..~
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC / DCS / PM / APC: a string terminated by BEL or ESC \
+            Some(']') | Some('P') | Some('^') | Some('_') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        chars.next_if_eq(&'\\');
+                        break;
+                    }
+                }
+            }
+            // Anything else is a two-byte escape, already consumed.
+            _ => {}
+        }
     }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn config_home() -> PathBuf {
@@ -2326,14 +2365,26 @@ fn draw_agents(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: 
             .iter()
             .map(|a| {
                 let text = format!("{} {:<8} {:<8} ", a.state.icon(), a.name, a.state.label());
+                let room = (inner.width as usize).saturating_sub(text.chars().count());
                 Line::from(vec![
                     styled(theme, a.state.role(), text),
-                    styled(theme, Role::Dim, a.last.clone()),
+                    styled(theme, Role::Dim, ellipsize(&a.last, room)),
                 ])
             })
             .collect()
     };
     Paragraph::new(lines).render(inner, buf);
+}
+
+/// `s` cut to `max` chars, with a trailing ellipsis when something was cut.
+fn ellipsize(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
 }
 
 /// Lines the input text wraps to at `width`, plus 2 border rows, clamped to a
@@ -2928,10 +2979,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn find_exit_code_parses_sentinel() {
-        assert_eq!(find_exit_code("hello\n__RG_EXIT_0__\n"), Some(0));
-        assert_eq!(find_exit_code("hello\n__RG_EXIT_7__\n"), Some(7));
-        assert_eq!(find_exit_code("no sentinel here"), None);
+    fn sanitize_log_line_drops_escapes_and_control_bytes() {
+        // A CSI cursor move written into the frame buffer would move the real
+        // cursor and shred the screen — it must never survive.
+        assert_eq!(sanitize_log_line("\u{1b}[40;36Hdone"), "done");
+        assert_eq!(sanitize_log_line("\u{1b}[1;32mok\u{1b}[0m"), "ok");
+        // OSC title set, BEL-terminated and ST-terminated.
+        assert_eq!(sanitize_log_line("\u{1b}]0;title\u{7}hi"), "hi");
+        assert_eq!(sanitize_log_line("\u{1b}]0;title\u{1b}\\hi"), "hi");
+        // Carriage-return redraws: only the last segment was visible.
+        assert_eq!(sanitize_log_line("50%\r100%"), "100%");
+        // Whitespace collapses so tab-aligned output stays on one row.
+        assert_eq!(sanitize_log_line("a\t\t b   c"), "a b c");
+    }
+
+    #[test]
+    fn last_log_line_skips_the_echoed_launch_command() {
+        // The shell echoes the long command we send-keys; the marker printed
+        // by the command itself separates that echo from real output.
+        let log = "( claude -p 'huge prompt' ); printf '%s%s\\n' '__RG_' 'START__'\n\
+                   __RG_START__\n\
+                   editing session.rs\n\
+                   __RG_EXIT_0__\n";
+        assert_eq!(last_log_line(log), "editing session.rs");
+    }
+
+    #[test]
+    fn last_log_line_survives_a_log_without_markers() {
+        assert_eq!(last_log_line("first\nsecond\n"), "second");
+        assert_eq!(last_log_line(""), "");
+    }
+
+    #[test]
+    fn ellipsize_marks_what_it_cut() {
+        assert_eq!(ellipsize("short", 10), "short");
+        assert_eq!(ellipsize("abcdef", 4), "abc…");
+        assert_eq!(ellipsize("abc", 0), "");
     }
 
     #[test]
@@ -2991,7 +3074,6 @@ mod tests {
         assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
     }
 
-    #[test]
     /// Wide terminals get a reading column, not a 200-char wall.
     #[test]
     fn chat_text_width_is_capped_on_wide_terminals() {
@@ -3016,12 +3098,6 @@ mod tests {
         let m = ChatMsg { role: ChatRole::Tool, text: "line1\nline2".into() };
         let lines = chat_lines("hacker", &m, 40);
         assert_eq!(lines.len(), 2);
-    }
-
-    #[test]
-    fn strip_sentinel_removes_marker() {
-        assert_eq!(strip_sentinel("out\n__RG_EXIT_0__\n"), "out\n");
-        assert_eq!(strip_sentinel("plain"), "plain");
     }
 
     #[test]
