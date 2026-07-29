@@ -243,6 +243,20 @@ struct App {
     /// Frame counter, advanced every event-loop pass (~200ms) so the spinner
     /// animates independently of how often the model sends something.
     spinner: usize,
+    /// Branch and uncommitted diff of the working repo, for the right half of
+    /// the status bar. Refreshed on the 1s tick, not per frame: a frame is
+    /// painted every 200ms and shelling out to git that often is wasteful.
+    /// `None` until the first refresh, or when the directory isn't a repo.
+    git: Option<GitStatus>,
+}
+
+/// What the status bar says about the repo: which branch the master is working
+/// on, and how much uncommitted work is sitting there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitStatus {
+    branch: String,
+    added: usize,
+    removed: usize,
 }
 
 impl App {
@@ -300,6 +314,7 @@ impl App {
             turn_started: None,
             turn_chars: 0,
             spinner: 0,
+            git: git_status(Path::new(repo)),
         }
     }
 
@@ -1670,6 +1685,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
         if last_poll.elapsed() >= Duration::from_secs(1) {
             app.refresh_agents();
             app.buddy_tick = app.buddy_tick.wrapping_add(1);
+            app.git = git_status(Path::new(&app.repo));
             last_poll = Instant::now();
         }
 
@@ -2536,6 +2552,86 @@ fn draw_activity(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme
     Paragraph::new(line).render(area, buf);
 }
 
+/// Branch and uncommitted line counts, read straight from git. `diff --numstat
+/// HEAD` covers staged and unstaged together, which is what "uncommitted work"
+/// means to someone watching the bar.
+fn git_status(repo: &Path) -> Option<GitStatus> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git").arg("-C").arg(repo).args(args).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    // On a repo with no commits yet HEAD doesn't resolve, so the branch name
+    // comes from the ref itself and the diff is simply skipped.
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .filter(|b| !b.is_empty() && b != "HEAD")
+        .or_else(|| git(&["symbolic-ref", "--short", "HEAD"]))?;
+    let (mut added, mut removed) = (0, 0);
+    for line in git(&["diff", "--numstat", "HEAD"]).unwrap_or_default().lines() {
+        let mut cols = line.split('\t');
+        // Binary files report "-" instead of a count; they add no lines to show.
+        added += cols.next().and_then(|c| c.parse::<usize>().ok()).unwrap_or(0);
+        removed += cols.next().and_then(|c| c.parse::<usize>().ok()).unwrap_or(0);
+    }
+    Some(GitStatus { branch, added, removed })
+}
+
+/// How the master's model reads in the status bar. The config carries the CLI's
+/// own alias (`sonnet`, `claude-opus-5`); those are spelled out, because "Opus
+/// 5" is how the model is named everywhere else. Anything unrecognized is shown
+/// verbatim rather than guessed at.
+fn model_label(cli: &str, model: Option<&str>) -> String {
+    let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else {
+        return cli.to_string();
+    };
+    let pretty = match model.to_ascii_lowercase() {
+        m if m.contains("opusplan") => Some("Opus Plan"),
+        m if m.contains("opus") => Some("Opus 5"),
+        m if m.contains("sonnet") => Some("Sonnet 5"),
+        m if m.contains("fable") => Some("Fable 5"),
+        m if m.contains("haiku") => Some("Haiku 4.5"),
+        _ => None,
+    };
+    match pretty {
+        // The pretty names are Claude's; another CLI's model keeps its own name,
+        // prefixed so it's clear whose it is.
+        Some(name) if cli == "claude" => name.to_string(),
+        _ => format!("{cli}/{model}"),
+    }
+}
+
+/// Context window the percentage is measured against. Every current Claude
+/// model is 200k, and the estimate is a rough gauge anyway.
+const CTX_WINDOW_TOKENS: usize = 200_000;
+
+/// Share of the window the conversation is estimated to occupy. Same ~4
+/// chars/token approximation the activity line uses — an indicator, not
+/// accounting, since the stream doesn't report usage back.
+fn ctx_percent(app: &App) -> usize {
+    let chars: usize = app.chat.iter().map(|m| m.text.chars().count()).sum();
+    (chars / 4 * 100 / CTX_WINDOW_TOKENS).min(100)
+}
+
+/// The right half of the status bar: what the master is running with, and the
+/// state of the repo it's running against. Mirrors Claude Code's own status
+/// line, so the two read the same when they sit in the same terminal.
+fn statusbar_context(app: &App, theme: &str) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        styled(theme, Role::Dim, "Model: "),
+        styled(theme, Role::Accent, model_label(&app.master_cli, app.master_model.as_deref())),
+        styled(theme, Role::Dim, " │ Ctx: "),
+        styled(theme, Role::Accent, format!("{}%", ctx_percent(app))),
+    ];
+    if let Some(git) = &app.git {
+        spans.push(styled(theme, Role::Dim, " │ ⎇ "));
+        spans.push(styled(theme, Role::Accent, git.branch.clone()));
+        spans.push(styled(theme, Role::Dim, " │ "));
+        spans.push(styled(theme, Role::Ok, format!("+{}", git.added)));
+        spans.push(styled(theme, Role::Dim, ","));
+        spans.push(styled(theme, Role::Fail, format!("-{}", git.removed)));
+    }
+    spans
+}
+
 fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, theme: &str) {
     if let Some((msg, ts)) = &app.flash {
         if ts.elapsed() < Duration::from_secs(2) {
@@ -2546,13 +2642,24 @@ fn draw_statusbar(area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App, them
     }
     let running = app.agents.iter().filter(|a| a.state == AgentState::Running).count();
     let ready = app.agents.iter().filter(|a| a.state == AgentState::Done).count();
-    let line = Line::from(vec![
+    let mut spans = vec![
         styled(theme, Role::Accent, running.to_string()),
         styled(theme, Role::Dim, " running · "),
         styled(theme, Role::Accent, ready.to_string()),
         styled(theme, Role::Dim, " ready · /help · /theme · /model · /resume · /quit"),
-    ]);
-    Paragraph::new(line).render(area, buf);
+    ];
+    // Right-aligned as one line instead of a second Paragraph over the same
+    // row: painting twice would blank what the first pass wrote.
+    let context = statusbar_context(app, theme);
+    let left: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let right: usize = context.iter().map(|s| s.content.chars().count()).sum();
+    // Dropped whole rather than truncated on a narrow terminal: half a branch
+    // name says less than nothing.
+    if let Some(pad) = (area.width as usize).checked_sub(left + right + 2) {
+        spans.push(Span::raw(" ".repeat(pad + 2)));
+        spans.extend(context);
+    }
+    Paragraph::new(Line::from(spans)).render(area, buf);
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -3819,6 +3926,80 @@ mod tests {
 
         // And the status bar keeps its own job instead of being taken over.
         assert!(painted.last().unwrap().contains("/help"), "the bar stays: {painted:?}");
+    }
+
+    #[test]
+    fn statusbar_names_the_model_context_and_repo_state() {
+        let mut config = Config::default();
+        config.master.cli = "claude".into();
+        config.master.model = Some("opus".into());
+        let mut app = App::new(&config, "/tmp/repo");
+        app.git = Some(GitStatus { branch: "main".into(), added: 12, removed: 3 });
+        // 4 chars/token, 200k window: 40k chars is 10k tokens, 5%.
+        app.chat = vec![ChatMsg { role: ChatRole::Info, text: "x".repeat(40_000) }];
+
+        let bar = render_to_lines(&mut app, 120, 24).last().cloned().unwrap();
+        assert!(bar.contains("Model: Opus 5"), "model: {bar}");
+        assert!(bar.contains("Ctx: 5%"), "context share: {bar}");
+        assert!(bar.contains("⎇ main"), "branch: {bar}");
+        assert!(bar.contains("+12,-3"), "uncommitted lines: {bar}");
+        // The agent counters keep the left edge.
+        let model_at = bar.find("Model:").unwrap();
+        assert!(bar.find("running").unwrap() < model_at, "context sits on the right: {bar}");
+    }
+
+    #[test]
+    fn statusbar_context_is_dropped_when_it_does_not_fit() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.git = Some(GitStatus { branch: "main".into(), added: 0, removed: 0 });
+        // Half a branch name says less than nothing, so the whole segment goes.
+        let bar = render_to_lines(&mut app, 60, 24).last().cloned().unwrap();
+        assert!(bar.contains("/help"), "the commands stay: {bar}");
+        assert!(!bar.contains("Model:"), "no truncated context: {bar}");
+    }
+
+    #[test]
+    fn model_label_spells_out_claude_models_and_leaves_the_rest_alone() {
+        assert_eq!(model_label("claude", Some("opus")), "Opus 5");
+        assert_eq!(model_label("claude", Some("claude-sonnet-5")), "Sonnet 5");
+        assert_eq!(model_label("claude", Some("opusplan")), "Opus Plan");
+        assert_eq!(model_label("claude", Some("haiku")), "Haiku 4.5");
+        // Unknown models and other CLIs keep their own name, prefixed.
+        assert_eq!(model_label("claude", Some("some-future-model")), "claude/some-future-model");
+        assert_eq!(model_label("codex", Some("gpt-5")), "codex/gpt-5");
+        assert_eq!(model_label("codex", Some("opus")), "codex/opus");
+        // No model configured: the CLI picks its own default, so only it is named.
+        assert_eq!(model_label("opencode", None), "opencode");
+        assert_eq!(model_label("claude", Some("  ")), "claude");
+    }
+
+    #[test]
+    fn git_status_reads_the_branch_and_uncommitted_lines() {
+        let dir = std::env::temp_dir().join(format!("rege-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "first"]);
+
+        let clean = git_status(&dir).expect("a repo");
+        assert_eq!(clean, GitStatus { branch: "main".into(), added: 0, removed: 0 });
+
+        std::fs::write(dir.join("a.txt"), "one\nthree\nfour\n").unwrap();
+        let dirty = git_status(&dir).expect("a repo");
+        assert_eq!(dirty.branch, "main");
+        assert_eq!((dirty.added, dirty.removed), (2, 1), "staged and unstaged together");
+
+        // Not a repo at all: the bar simply drops the segment.
+        assert!(git_status(Path::new("/")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
