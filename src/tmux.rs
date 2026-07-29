@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 
 const EXIT_PREFIX: &str = "__RG_EXIT_";
 const EXIT_SUFFIX: &str = "__";
+/// Printed by the command itself as its first output, so we can tell real
+/// output from the shell's echo of the keystrokes we inject.
+const START_MARKER: &str = "__RG_START__";
 
 pub struct Tmux {
     pub session: String,
@@ -46,8 +49,13 @@ impl Tmux {
         let pipe_cmd = format!("cat >> {}", shell_quote(&self.logfile));
         run_tmux(&["pipe-pane", "-o", "-t", &self.session, &pipe_cmd])?;
         // subshell so a command that calls `exit` doesn't kill our shell
-        // before the sentinel is written.
-        let wrapped = format!("( {} ); printf '\\n{}%s{}\\n' \"$?\"", command, EXIT_PREFIX, EXIT_SUFFIX);
+        // before the sentinel is written. Both markers are assembled from
+        // pieces at runtime so the shell's echo of this line — which contains
+        // the whole worker prompt — can never look like a marker.
+        let wrapped = format!(
+            "printf '%s%s\\n' '__RG_' 'START__'; ( {} ); printf '\\n%s%s%s%s\\n' '__RG_' 'EXIT_' \"$?\" '__'",
+            command
+        );
         run_tmux(&["send-keys", "-t", &self.session, &wrapped, "Enter"])?;
         Ok(())
     }
@@ -79,9 +87,9 @@ impl Tmux {
         find_exit_code(&self.log_contents())
     }
 
-    /// Full captured output with the sentinel line stripped.
+    /// Full captured output, without the echoed launch line or the sentinel.
     pub fn output(&self) -> String {
-        strip_sentinel(&self.log_contents())
+        strip_sentinel(strip_launch_echo(&self.log_contents()))
     }
 
     /// Current visible pane snapshot (for live dashboards).
@@ -116,7 +124,9 @@ impl Tmux {
     }
 }
 
-fn find_exit_code(log: &str) -> Option<i32> {
+/// Exit code from the sentinel line, skipping occurrences that are just the
+/// echoed command text (`%s` where the code should be).
+pub fn find_exit_code(log: &str) -> Option<i32> {
     let mut search_from = 0;
     while let Some(rel) = log[search_from..].find(EXIT_PREFIX) {
         let start = search_from + rel + EXIT_PREFIX.len();
@@ -130,7 +140,18 @@ fn find_exit_code(log: &str) -> Option<i32> {
     None
 }
 
-fn strip_sentinel(log: &str) -> String {
+/// The log from the start marker on. Before it sits the shell's echo of the
+/// command we injected, which is keystrokes, not output. Logs written before
+/// the marker existed (or captured mid-launch) come back untouched.
+pub fn strip_launch_echo(log: &str) -> &str {
+    match log.find(START_MARKER) {
+        Some(i) => log[i + START_MARKER.len()..].trim_start_matches(['\r', '\n']),
+        None => log,
+    }
+}
+
+/// The log with real sentinel lines removed (echoed prefixes are kept).
+pub fn strip_sentinel(log: &str) -> String {
     let mut out = String::new();
     let mut rest = log;
     loop {
@@ -228,7 +249,19 @@ mod tests {
         assert_eq!(t.exit_code(), Some(0));
         assert!(t.output().contains("hello-tmux"));
         assert!(find_exit_code(&t.output()).is_none());
+        // The shell echoes the command we injected; that echo is keystrokes,
+        // not output, and would otherwise dominate every status line.
+        assert!(!t.output().contains("echo hello-tmux"), "launch echo leaked: {:?}", t.output());
+        assert!(!t.output().contains(START_MARKER));
         t.kill().unwrap();
+    }
+
+    #[test]
+    fn strip_launch_echo_cuts_everything_up_to_the_marker() {
+        let log = "printf '%s%s\\n' '__RG_' 'START__'; ( work )\n__RG_START__\nreal output\n";
+        assert_eq!(strip_launch_echo(log), "real output\n");
+        // No marker (older log, or read mid-launch): nothing is dropped.
+        assert_eq!(strip_launch_echo("plain\n"), "plain\n");
     }
 
     #[test]
