@@ -10,7 +10,8 @@ use crate::engine::Engine;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command as Proc;
+use std::process::{Command as Proc, Stdio};
+use std::time::{Duration, Instant};
 
 pub struct Session<'a> {
     repo: PathBuf,
@@ -183,16 +184,67 @@ impl<'a> Session<'a> {
     }
 
     /// Ask a stronger model a one-shot question (escalation without spawning a worker).
+    ///
+    /// Runs under three constraints, all learned the hard way: the child gets a
+    /// null stdin (it would otherwise inherit the MCP JSON-RPC pipe and steal
+    /// the master's messages), `text_only_flags` (a tool-using child blocks on a
+    /// permission prompt whose text lands on stdout as if it were the answer),
+    /// and a deadline (a blocking wait freezes the single-threaded MCP loop, so
+    /// the whole session hangs on one question).
     pub fn consult(&self, question: &str, model: Option<&str>, cli: Option<&str>) -> Result<Value> {
         let model = model.unwrap_or("opus");
         let cli = cli.unwrap_or("claude");
-        let argv = command::argv(cli, question, Some(model), false)?;
-        let out = Proc::new(&argv[0]).args(&argv[1..]).current_dir(&self.repo).output()?;
-        Ok(json!({
-            "model": model,
-            "answer": String::from_utf8_lossy(&out.stdout).trim().to_string(),
-            "ok": out.status.success(),
-        }))
+        let mut argv = command::argv(cli, question, Some(model), false)?;
+        argv.extend(command::text_only_flags(cli));
+
+        // Files, not pipes: a full pipe buffer would deadlock a child we are
+        // only polling, never draining.
+        let dir = self.repo.join(".rege-runs");
+        std::fs::create_dir_all(&dir)?;
+        let out_path = dir.join(format!("consult-{}.out", std::process::id()));
+        let err_path = dir.join(format!("consult-{}.err", std::process::id()));
+
+        let mut child = Proc::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(&self.repo)
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(&out_path)?)
+            .stderr(std::fs::File::create(&err_path)?)
+            .spawn()?;
+
+        let secs = self.config.timeouts.get("consult").copied().unwrap_or(300);
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        let status = loop {
+            match child.try_wait()? {
+                Some(status) => break Some(status),
+                None if Instant::now() > deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                None => std::thread::sleep(Duration::from_millis(100)),
+            }
+        };
+
+        let answer = std::fs::read_to_string(&out_path).unwrap_or_default().trim().to_string();
+        let stderr = std::fs::read_to_string(&err_path).unwrap_or_default().trim().to_string();
+        let _ = std::fs::remove_file(&out_path);
+        let _ = std::fs::remove_file(&err_path);
+
+        Ok(match status {
+            Some(status) => json!({
+                "model": model,
+                "answer": answer,
+                "ok": status.success(),
+                "error": if status.success() || stderr.is_empty() { Value::Null } else { json!(stderr) },
+            }),
+            None => json!({
+                "model": model,
+                "answer": answer,
+                "ok": false,
+                "error": format!("consult timed out after {secs}s (partial answer, if any, above)"),
+            }),
+        })
     }
 
     pub fn open_pr(&self, branch: &str, title: &str, body: &str) -> Result<Value> {
