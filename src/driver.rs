@@ -7,8 +7,26 @@
 
 use crate::stream::{self, Event};
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+
+/// Where the running master process is parked while a turn is in flight, so
+/// whoever started the turn can kill it from another thread (Ctrl-C).
+pub type ChildSlot = Arc<Mutex<Option<Child>>>;
+
+pub fn child_slot() -> ChildSlot {
+    Arc::new(Mutex::new(None))
+}
+
+/// Kills the master if a turn is running. No-op on an empty slot.
+pub fn kill(slot: &ChildSlot) {
+    let taken = slot.lock().ok().and_then(|mut g| g.take());
+    if let Some(mut child) = taken {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
 
 /// Spawns one turn of the master model and streams parsed events back over
 /// `tx`. Only `cli == "claude"` is supported; anything else sends a single
@@ -21,6 +39,7 @@ pub fn spawn_turn(
     task: &str,
     session_id: Option<String>,
     tx: Sender<Event>,
+    slot: ChildSlot,
 ) {
     if cli != "claude" {
         let _ = tx.send(Event::Text(format!(
@@ -42,6 +61,11 @@ pub fn spawn_turn(
     };
 
     let stdout = child.stdout.take().expect("stdout piped");
+    // Park the child where the TUI can reach it: an interrupt kills it from
+    // there, and this thread just sees stdout hit EOF.
+    if let Ok(mut g) = slot.lock() {
+        *g = Some(child);
+    }
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let Ok(line) = line else { break };
@@ -52,12 +76,15 @@ pub fn spawn_turn(
         let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         for event in stream::parse_line(&json) {
             if tx.send(event).is_err() {
-                let _ = child.kill();
+                kill(&slot);
                 return;
             }
         }
     }
-    let _ = child.wait();
+    let reaped = slot.lock().ok().and_then(|mut g| g.take());
+    if let Some(mut child) = reaped {
+        let _ = child.wait();
+    }
 }
 
 fn build_argv(

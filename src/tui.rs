@@ -248,7 +248,17 @@ struct App {
     /// painted every 200ms and shelling out to git that often is wasteful.
     /// `None` until the first refresh, or when the directory isn't a repo.
     git: Option<GitStatus>,
+    /// The master process behind the running turn, so Ctrl-C can kill it.
+    /// `None` while idle.
+    turn_child: Option<driver::ChildSlot>,
+    /// When the last Ctrl-C landed with nothing left to interrupt. A second
+    /// one inside `CTRL_C_WINDOW` is what actually quits.
+    ctrl_c_at: Option<Instant>,
 }
+
+/// How long a lone Ctrl-C stays armed to quit — same span the hint is on
+/// screen, so the offer and the window end together.
+const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 
 /// What the status bar says about the repo: which branch the master is working
 /// on, and how much uncommitted work is sitting there.
@@ -315,6 +325,8 @@ impl App {
             turn_chars: 0,
             spinner: 0,
             git: git_status(Path::new(repo)),
+            turn_child: None,
+            ctrl_c_at: None,
         }
     }
 
@@ -877,14 +889,66 @@ impl App {
         self.rx = Some(rx);
         self.turn_started = Some(Instant::now());
         self.turn_chars = 0;
+        let slot = driver::child_slot();
+        self.turn_child = Some(slot.clone());
         let cli = self.master_cli.clone();
         let model = self.master_model.clone();
         let repo = self.repo.clone();
         let playbook = self.playbook_prompt.clone();
         let session_id = self.session_id.clone();
         std::thread::spawn(move || {
-            driver::spawn_turn(&cli, model.as_deref(), &repo, Some(&playbook), &task, session_id, tx);
+            driver::spawn_turn(&cli, model.as_deref(), &repo, Some(&playbook), &task, session_id, tx, slot);
         });
+    }
+
+    /// One Ctrl-C. Undoes the most recent thing first — an open overlay, then
+    /// a running turn, then a half-typed line — and only quits (`true`) when
+    /// there is nothing left to undo and the previous press already said so.
+    fn on_ctrl_c(&mut self) -> bool {
+        if !matches!(self.mode, Mode::Normal) {
+            self.mode = Mode::Normal;
+            self.ctrl_c_at = None;
+            return false;
+        }
+        if self.interrupt_turn() || self.clear_input() {
+            self.ctrl_c_at = None;
+            return false;
+        }
+        match self.ctrl_c_at {
+            Some(at) if at.elapsed() < CTRL_C_WINDOW => true,
+            _ => {
+                self.ctrl_c_at = Some(Instant::now());
+                self.flash = Some(("press Ctrl-C again to exit".to_string(), Instant::now()));
+                false
+            }
+        }
+    }
+
+    /// Kills the master mid-turn. False when nothing was running.
+    fn interrupt_turn(&mut self) -> bool {
+        if self.rx.is_none() {
+            return false;
+        }
+        if let Some(slot) = self.turn_child.take() {
+            driver::kill(&slot);
+        }
+        self.rx = None;
+        self.turn_started = None;
+        self.push(ChatRole::Info, "⏹ turn interrupted.");
+        true
+    }
+
+    /// Wipes a half-typed line. False when the input was already empty.
+    fn clear_input(&mut self) -> bool {
+        if self.input.is_empty() {
+            return false;
+        }
+        self.input.clear();
+        self.input_cursor = 0;
+        self.menu_cursor = 0;
+        self.history_idx = None;
+        self.history_draft.clear();
+        true
     }
 
     /// Asks about scanning this directory, but only where it's free of
@@ -1042,6 +1106,7 @@ impl App {
         if disconnected {
             self.rx = None;
             self.turn_started = None;
+            self.turn_child = None;
         }
     }
 
@@ -1068,6 +1133,7 @@ impl App {
                 self.push(ChatRole::Info, "— concluído".to_string());
                 self.rx = None;
                 self.turn_started = None;
+                self.turn_child = None;
             }
         }
     }
@@ -1696,8 +1762,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                         continue;
                     }
                     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                        break;
+                        if app.on_ctrl_c() {
+                            break;
+                        }
+                        continue;
                     }
+                    // Any other key means the user moved on: the pending quit
+                    // offer shouldn't still be live minutes later.
+                    app.ctrl_c_at = None;
                     match app.mode {
                         Mode::ThemePicker { .. } => match key.code {
                             KeyCode::Up => app.picker_move(-1),
@@ -3390,6 +3462,67 @@ mod tests {
         app.submit();
         assert!(app.chat.iter().any(|m| m.text.contains("faz algo")));
         assert!(app.rx.is_some());
+    }
+
+    #[test]
+    fn ctrl_c_closes_an_open_overlay_instead_of_quitting() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.mode = Mode::HelpPicker { cursor: 0 };
+        assert!(!app.on_ctrl_c());
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_a_running_turn_instead_of_quitting() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        let (_tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        app.turn_started = Some(Instant::now());
+        assert!(!app.on_ctrl_c());
+        assert!(app.rx.is_none());
+        assert!(app.turn_started.is_none());
+        assert!(app.chat.iter().any(|m| m.text.contains("interrupted")));
+    }
+
+    #[test]
+    fn ctrl_c_clears_a_half_typed_line_instead_of_quitting() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.set_input("meia frase".to_string());
+        assert!(!app.on_ctrl_c());
+        assert!(app.input.is_empty());
+        assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn quitting_takes_two_ctrl_c_in_a_row() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        assert!(!app.on_ctrl_c(), "the first one only arms the exit");
+        let (msg, _) = app.flash.clone().expect("hint on screen");
+        assert!(msg.contains("again"), "the hint should say to press it again: {msg}");
+        assert!(app.on_ctrl_c(), "the second one leaves");
+    }
+
+    #[test]
+    fn an_interrupting_ctrl_c_does_not_arm_the_exit() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        let (_tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        assert!(!app.on_ctrl_c(), "interrupts the turn");
+        assert!(!app.on_ctrl_c(), "and the next one still only arms the exit");
+        assert!(app.on_ctrl_c());
+    }
+
+    #[test]
+    fn the_exit_offer_expires_with_its_window() {
+        let config = Config::default();
+        let mut app = App::new(&config, "/tmp/repo");
+        app.ctrl_c_at = Some(Instant::now() - CTRL_C_WINDOW - Duration::from_millis(1));
+        assert!(!app.on_ctrl_c(), "a stale press shouldn't count as the first of a pair");
     }
 
     #[test]
