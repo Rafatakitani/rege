@@ -29,7 +29,7 @@ understand what you are asking for.** It is not a security sandbox.
 
 ## Requirements
 
-- Rust / Cargo
+- Rust / Cargo (the installer below sets this up for you if it's missing)
 - `git`, `tmux`
 - At least one AI CLI installed and authenticated. **Today the master is only fully
   wired for `claude`**; `codex`/`gemini`/`opencode` work as workers on a best-effort
@@ -40,13 +40,28 @@ understand what you are asking for.** It is not a security sandbox.
 
 ## Installation
 
+One command — even on a machine without Rust:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Rafatakitani/rege/main/install.sh | sh
+```
+
+It checks for `git`, installs Rust via [rustup](https://rustup.rs) when `cargo` is
+missing (user-space, no sudo), compiles the latest rege straight from this repo
+(same profile and build cache `rege update` uses, so later updates start warm),
+and tells you if `tmux` still needs installing. `REGE_BRANCH=x` in front pins a
+branch or tag. As with any `curl | sh`, feel free to
+[read the script](install.sh) first.
+
+Prefer to do it by hand?
+
 ```bash
 git clone https://github.com/Rafatakitani/rege.git
 cd rege
 cargo install --path .
 ```
 
-That installs the `rege` binary into `~/.cargo/bin` (make sure it is on your `PATH`).
+Either way the `rege` binary lands in `~/.cargo/bin` (make sure it is on your `PATH`).
 
 To update later, from any directory (with no new commit on the remote it answers
 straight away, compiling nothing):
